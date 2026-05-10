@@ -1,0 +1,40 @@
+# Runtime data — never commit recordings or extracted frames
+data/videos/
+data/frames/
+data/traces/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+nohup.out
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Environment files — keep out of version control
+.env
+.env.*
+!.env.example
+
+# The hf-space directory has its own git repo for HF deployment
+# Track the source files but not the nested .git
+frontend/hf-space/.git/
+frontend/.git/
