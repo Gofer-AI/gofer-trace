@@ -29,7 +29,7 @@ def _safe(d, key, default=""):
 
 def upload_and_analyze(video_path):
     if video_path is None:
-        return "Upload or record a video first.", None, "", "", None, None
+        return "Upload or record a video first.", None, "", None, "", None, None
 
     try:
         with open(video_path, "rb") as f:
@@ -39,10 +39,10 @@ def upload_and_analyze(video_path):
                 timeout=120,
             )
     except Exception as e:
-        return f"Upload error: {e}", None, "", "", None, None
+        return f"Upload error: {e}", None, "", None, "", None, None
 
     if up.status_code != 200:
-        return f"Upload failed ({up.status_code}): {up.text}", None, "", "", None, None
+        return f"Upload failed ({up.status_code}): {up.text}", None, "", None, "", None, None
 
     up_data = up.json()
     video_id = up_data["video_id"]
@@ -56,10 +56,10 @@ def upload_and_analyze(video_path):
     try:
         an = requests.post(f"{API_BASE}/analyze/{video_id}", timeout=1800)
     except Exception as e:
-        return f"Analyze error: {e}", video_path, "", "", None, None
+        return f"Analyze error: {e}", video_path, "", None, "", None, None
 
     if an.status_code != 200:
-        return f"Analyze failed ({an.status_code}): {an.text}", video_path, "", "", None, None
+        return f"Analyze failed ({an.status_code}): {an.text}", video_path, "", None, "", None, None
 
     an_data = an.json()
     trace = an_data.get("trace", {})
@@ -73,11 +73,11 @@ def upload_and_analyze(video_path):
     )
 
     timeline_md = _render_timeline(trace)
-    launcher_html = _render_launcher(video_url, trace)
+    launcher_btns = _render_launcher_buttons(trace)
     trace_file = _write_trace(video_id, trace)
-    launcher_file = _write_launcher(video_id, launcher_html)
+    launcher_file = _write_launcher(video_id, _render_launcher(video_url, trace))
 
-    return status, video_path, timeline_md, launcher_html, trace_file, launcher_file
+    return status, video_path, timeline_md, video_path, launcher_btns, trace_file, launcher_file
 
 
 def _render_timeline(trace):
@@ -104,19 +104,22 @@ def _render_timeline(trace):
 
 
 def _render_launcher(video_url, trace):
+    """Standalone HTML file export — keeps embedded video for the downloaded file."""
     if not video_url:
-        return "<p>No video URL available. Analyze a video first.</p>"
+        return "<p>No video URL available.</p>"
 
     steps = trace.get("steps", [])
+    timestamps = [float(s.get("timestamp_sec", 0) or 0) for s in steps]
     btns = ""
-    for s in steps:
-        t = float(s.get("timestamp_sec", 0) or 0)
+    for i, s in enumerate(steps):
+        t_start = timestamps[i]
+        t_end = timestamps[i + 1] if i + 1 < len(timestamps) else t_start + 15
         sid = s.get("step_id", "?")
         intent = escape(_safe(s, "inferred_intent", "Jump to segment"))
         obs = escape(_safe(s, "observation", ""))
         btns += f"""
-        <button class="seg-btn" onclick="jumpTo({t})">
-          <span class="seg-title">Step {sid} &middot; {t:.1f}s</span>
+        <button class="seg-btn" onclick="jumpTo({t_start},{t_end},this)">
+          <span class="seg-title">Step {sid} &middot; {t_start:.1f}s</span>
           <span class="seg-intent">{intent}</span>
           <span class="seg-obs">{obs}</span>
         </button>"""
@@ -136,10 +139,31 @@ def _render_launcher(video_url, trace):
   </div>
 </div>
 <script>
-function jumpTo(t) {{
-  var v = document.getElementById("goferVideo");
-  if (v) {{ v.currentTime = t; v.play(); }}
+var _clipEnd = null, _activeBtn = null;
+var _vid = null;
+function _getVid() {{
+  if (!_vid) _vid = document.getElementById("goferVideo");
+  return _vid;
 }}
+function jumpTo(start, end, btn) {{
+  var v = _getVid();
+  if (!v) return;
+  _clipEnd = end;
+  if (_activeBtn) _activeBtn.classList.remove("seg-active");
+  _activeBtn = btn;
+  btn.classList.add("seg-active");
+  v.currentTime = start;
+  v.play();
+}}
+document.addEventListener("DOMContentLoaded", function() {{
+  var v = _getVid();
+  if (v) v.addEventListener("timeupdate", function() {{
+    if (_clipEnd !== null && v.currentTime >= _clipEnd) {{
+      v.pause();
+      _clipEnd = null;
+    }}
+  }});
+}});
 </script>
 <style>
 .gofer-shell {{display:grid;grid-template-columns:1.1fr 0.9fr;gap:16px;width:100%}}
@@ -148,10 +172,92 @@ function jumpTo(t) {{
 .segment-list {{display:flex;flex-direction:column;gap:10px;max-height:520px;overflow-y:auto}}
 .seg-btn {{text-align:left;border:1px solid #334155;background:#111827;color:#e5e7eb;padding:12px;border-radius:12px;cursor:pointer;width:100%}}
 .seg-btn:hover {{background:#1e293b;border-color:#60a5fa}}
+.seg-btn.seg-active {{background:#1e3a5f;border-color:#3b82f6;box-shadow:0 0 0 2px #3b82f640}}
 .seg-title {{display:block;font-weight:700;color:#93c5fd;margin-bottom:4px}}
 .seg-intent {{display:block;font-size:.92rem;margin-bottom:4px}}
 .seg-obs {{display:block;font-size:.82rem;color:#cbd5e1}}
 @media(max-width:900px){{.gofer-shell{{grid-template-columns:1fr}}}}
+</style>"""
+
+
+def _render_launcher_buttons(trace):
+    """Buttons-only HTML for the in-app launcher tab. Targets the gr.Video player via DOM."""
+    steps = trace.get("steps", [])
+    if not steps:
+        return "<p style='color:#94a3b8'>No segments found. Analyze a video first.</p>"
+
+    timestamps = [float(s.get("timestamp_sec", 0) or 0) for s in steps]
+    btns = ""
+    for i, s in enumerate(steps):
+        t_start = timestamps[i]
+        t_end = timestamps[i + 1] if i + 1 < len(timestamps) else t_start + 15
+        sid = s.get("step_id", "?")
+        intent = escape(_safe(s, "inferred_intent", "Jump to segment"))
+        obs = escape(_safe(s, "observation", ""))
+        btns += f"""
+        <button class="seg-btn" id="seg-btn-{i}" onclick="goferJump({t_start},{t_end},{i})">
+          <span class="seg-title">Step {sid} &middot; {t_start:.1f}s</span>
+          <span class="seg-intent">{intent}</span>
+          <span class="seg-obs">{obs}</span>
+        </button>"""
+
+    return f"""
+<div class="seg-panel">
+  <h3 style="margin:0 0 8px;color:#93c5fd">Contextual Segment Launcher</h3>
+  <p style="margin:0 0 12px;font-size:.9rem;color:#94a3b8">
+    Click a segment to jump the video and play just that clip.
+  </p>
+  <div class="segment-list">{btns}</div>
+</div>
+<script>
+(function() {{
+  var _clipEnd = null;
+  var _activeIdx = null;
+  var _listenAttached = false;
+
+  function _findVideo() {{
+    var el = document.getElementById("launcher-video-player");
+    return el ? el.querySelector("video") : null;
+  }}
+
+  window.goferJump = function(start, end, idx) {{
+    var v = _findVideo();
+    if (!v) {{
+      // Video element not ready yet — retry once after a short delay
+      setTimeout(function() {{ window.goferJump(start, end, idx); }}, 300);
+      return;
+    }}
+    if (!_listenAttached) {{
+      v.addEventListener("timeupdate", function() {{
+        if (_clipEnd !== null && v.currentTime >= _clipEnd) {{
+          v.pause();
+          _clipEnd = null;
+        }}
+      }});
+      _listenAttached = true;
+    }}
+    _clipEnd = end;
+    if (_activeIdx !== null) {{
+      var prev = document.getElementById("seg-btn-" + _activeIdx);
+      if (prev) prev.classList.remove("seg-active");
+    }}
+    _activeIdx = idx;
+    var btn = document.getElementById("seg-btn-" + idx);
+    if (btn) btn.classList.add("seg-active");
+    v.currentTime = start;
+    v.play();
+  }};
+}})();
+</script>
+<style>
+.seg-panel {{padding:8px 0}}
+.segment-list {{display:flex;flex-direction:column;gap:10px;max-height:480px;overflow-y:auto}}
+.seg-btn {{text-align:left;border:1px solid #334155;background:#111827;color:#e5e7eb;padding:12px;border-radius:12px;cursor:pointer;width:100%;font-family:inherit}}
+.seg-btn:hover {{background:#1e293b;border-color:#60a5fa}}
+.seg-btn.seg-active {{background:#1e3a5f;border-color:#3b82f6;box-shadow:0 0 0 2px #3b82f640}}
+.seg-title {{display:block;font-weight:700;color:#93c5fd;margin-bottom:4px}}
+.seg-intent {{display:block;font-size:.92rem;margin-bottom:4px}}
+.seg-obs {{display:block;font-size:.82rem;color:#cbd5e1}}
 </style>"""
 
 
@@ -229,7 +335,7 @@ def generate_sop():
 
 def reset_app():
     STATE.update({"video_id": None, "trace": None, "video_url": None})
-    return "Reset complete.", None, "", "", None, None, [], ""
+    return "Reset complete.", None, "", None, "", None, None, [], ""
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +381,17 @@ with gr.Blocks(css=CSS, title="Gofer Trace") as demo:
 
     with gr.Tabs():
         with gr.Tab("Segmented Video Launcher"):
-            launcher_out = gr.HTML()
+            with gr.Row():
+                with gr.Column(scale=3):
+                    launcher_video = gr.Video(
+                        label="Workflow Video",
+                        elem_id="launcher-video-player",
+                        interactive=False,
+                    )
+                with gr.Column(scale=2):
+                    launcher_btns = gr.HTML(
+                        "<p style='color:#94a3b8'>Analyze a video to see segments.</p>"
+                    )
 
         with gr.Tab("Workflow Timeline"):
             timeline_out = gr.Markdown()
@@ -306,7 +422,7 @@ with gr.Blocks(css=CSS, title="Gofer Trace") as demo:
     analyze_btn.click(
         fn=upload_and_analyze,
         inputs=[video_input],
-        outputs=[status_box, video_preview, timeline_out, launcher_out, trace_dl, launcher_dl],
+        outputs=[status_box, video_preview, timeline_out, launcher_video, launcher_btns, trace_dl, launcher_dl],
     )
 
     sop_btn.click(fn=generate_sop, inputs=[], outputs=[sop_out])
@@ -314,7 +430,7 @@ with gr.Blocks(css=CSS, title="Gofer Trace") as demo:
     reset_btn.click(
         fn=reset_app,
         inputs=[],
-        outputs=[status_box, video_preview, timeline_out, launcher_out,
+        outputs=[status_box, video_preview, timeline_out, launcher_video, launcher_btns,
                  trace_dl, launcher_dl, chatbot, sop_out],
     )
 
