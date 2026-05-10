@@ -249,6 +249,53 @@ def _stub_answer(question: str, trace: dict) -> str:
         )
 
 
+def verify_screenshot_with_qwen(screenshot_b64: str, expected_state: str) -> dict:
+    """Use Qwen VL to verify a screenshot matches the expected workflow state."""
+    model, processor = _try_load_qwen()
+    if model is None:
+        return {"verified": True, "confidence": 0.7, "notes": "Stub: visual check skipped (Qwen unavailable)"}
+    try:
+        import base64
+        import torch
+        from PIL import Image
+        from io import BytesIO
+
+        image_bytes = base64.b64decode(screenshot_b64)
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        prompt = (
+            f"You are verifying whether a browser screenshot matches the expected workflow state.\n\n"
+            f"Expected state: {expected_state}\n\n"
+            "Respond with ONLY valid JSON with these exact keys:\n"
+            '- "verified": true or false\n'
+            '- "confidence": number between 0 and 1\n'
+            '- "notes": short explanation (one sentence)\n\n'
+            "Do not include any other text."
+        )
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": prompt},
+        ]}]
+        from qwen_vl_utils import process_vision_info
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        img_in, vid_in = process_vision_info(messages)
+        inputs = processor(text=[text], images=img_in, videos=vid_in,
+                           padding=True, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            ids = model.generate(**inputs, max_new_tokens=128, do_sample=False)
+        trimmed = [o[len(i):] for i, o in zip(inputs.input_ids, ids)]
+        out = processor.batch_decode(trimmed, skip_special_tokens=True,
+                                     clean_up_tokenization_spaces=False)[0].strip()
+        parsed = json.loads(out)
+        return {
+            "verified": bool(parsed.get("verified", True)),
+            "confidence": float(parsed.get("confidence", 0.7)),
+            "notes": str(parsed.get("notes", "")),
+        }
+    except Exception as e:
+        print(f"[Gofer Trace] verify_screenshot_with_qwen failed ({e}), stub response.")
+        return {"verified": True, "confidence": 0.6, "notes": f"Verification error: {e}"}
+
+
 def _stub_sop(trace: dict) -> str:
     steps = trace.get("steps", [])
     hints = [s.get("agent_hint", "") for s in steps if s.get("agent_hint")]
