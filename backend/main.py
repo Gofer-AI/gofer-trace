@@ -6,9 +6,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "agent"))
 
+from settings import get_settings
+from knowledge_base import FileKnowledgeBase
 from video_processing import extract_frames
 from model_client import analyze_frame_with_qwen as analyze_frame_stub
-from trace_builder import build_trace, save_trace
+from trace_builder import build_trace
 
 app = FastAPI(title="Gofer Trace API")
 
@@ -23,11 +25,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/media/videos", StaticFiles(directory="../data/videos"), name="videos")
-app.mount("/media/frames", StaticFiles(directory="../data/frames"), name="frames")
+settings = get_settings()
+settings.ensure_dirs()
 
-VIDEO_DIR = Path("../data/videos")
-VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+# Storage seam — swap FileKnowledgeBase for GraphKnowledgeBase (Phase 1) with no
+# changes to the endpoints below.
+KB = FileKnowledgeBase(settings.traces_dir)
+
+app.mount("/media/videos", StaticFiles(directory=str(settings.videos_dir)), name="videos")
+app.mount("/media/frames", StaticFiles(directory=str(settings.frames_dir)), name="frames")
+
+VIDEO_DIR = settings.videos_dir
 
 
 @app.get("/")
@@ -35,8 +43,21 @@ def root():
     return {
         "app": "Gofer Trace",
         "status": "running",
+        "profile": settings.profile,
         "message": "Upload a workflow recording, analyze it, and generate agent memory."
     }
+
+
+@app.get("/workflows")
+def list_workflows():
+    """List all analyzed workflows in the knowledge base."""
+    return {"workflows": KB.list_workflows()}
+
+
+@app.get("/search")
+def search_workflows(q: str, k: int = 5):
+    """Search workflows by keyword (Phase 2 upgrades this to semantic search)."""
+    return {"query": q, "results": KB.search(q, k)}
 
 
 @app.post("/upload")
@@ -62,20 +83,28 @@ async def analyze_video(video_id: str):
         return {"error": "video not found", "video_id": video_id}
 
     video_path = str(matches[0])
-    frames = extract_frames(video_path, video_id, every_seconds=8.0)
+    frame_sampling_sec = 8.0
+    frames = extract_frames(video_path, video_id, every_seconds=frame_sampling_sec)
 
     frame_analyses = [
         analyze_frame_stub(frame["path"], frame["timestamp_sec"])
         for frame in frames
     ]
 
-    trace = build_trace(video_id, frame_analyses)
-    trace_path = save_trace(video_id, trace)
+    source = {
+        "kind": "screen_recording",
+        "media_uri": f"/media/videos/{matches[0].name}",
+        "frame_sampling_sec": frame_sampling_sec,
+    }
+    model = {"vlm": settings.vlm, "profile": settings.profile}
+
+    trace = build_trace(video_id, frame_analyses, source=source, model=model)
+    KB.put_trace(trace)  # validates against the schema before persisting
 
     return {
         "video_id": video_id,
         "frames_extracted": len(frames),
-        "trace_path": trace_path,
+        "trace_path": str(settings.traces_dir / f"{video_id}.json"),
         "trace": trace
     }
 
@@ -87,38 +116,31 @@ class AskRequest(BaseModel):
     question: str
 
 
-@app.get("/trace/{video_id}")
-async def get_trace(video_id: str):
-    trace_path = Path("../data/traces") / f"{video_id}.json"
-
-    if not trace_path.exists():
-        return {
+def _load_trace_or_error(video_id: str):
+    """Return (trace, None) or (None, error_dict) via the knowledge base."""
+    trace = KB.get_workflow(video_id)
+    if trace is None:
+        return None, {
             "error": "trace not found",
             "video_id": video_id,
-            "hint": "Run /analyze/{video_id} first."
+            "hint": "Run /analyze/{video_id} first.",
         }
+    return trace, None
 
-    with trace_path.open("r") as f:
-        trace = json.load(f)
 
-    return trace
+@app.get("/trace/{video_id}")
+async def get_trace(video_id: str):
+    trace, error = _load_trace_or_error(video_id)
+    return error or trace
 
 
 @app.post("/ask/{video_id}")
 async def ask_trace(video_id: str, request: AskRequest):
     from model_client import answer_question_over_trace
 
-    trace_path = Path("../data/traces") / f"{video_id}.json"
-
-    if not trace_path.exists():
-        return {
-            "error": "trace not found",
-            "video_id": video_id,
-            "hint": "Run /analyze/{video_id} first."
-        }
-
-    with trace_path.open("r") as f:
-        trace = json.load(f)
+    trace, error = _load_trace_or_error(video_id)
+    if error:
+        return error
 
     answer = answer_question_over_trace(request.question, trace)
 
@@ -133,17 +155,9 @@ async def ask_trace(video_id: str, request: AskRequest):
 async def generate_sop(video_id: str):
     from model_client import answer_question_over_trace
 
-    trace_path = Path("../data/traces") / f"{video_id}.json"
-
-    if not trace_path.exists():
-        return {
-            "error": "trace not found",
-            "video_id": video_id,
-            "hint": "Run /analyze/{video_id} first."
-        }
-
-    with trace_path.open("r") as f:
-        trace = json.load(f)
+    trace, error = _load_trace_or_error(video_id)
+    if error:
+        return error
 
     question = """
 Convert this workflow trace into a reusable SOP for an AI agent.
@@ -189,13 +203,9 @@ async def get_execution_plan(video_id: str):
     """Return the structured browser execution plan derived from the trace."""
     from planner import build_execution_plan
 
-    trace_path = Path("../data/traces") / f"{video_id}.json"
-    if not trace_path.exists():
-        return {"error": "trace not found", "video_id": video_id,
-                "hint": "Run /analyze/{video_id} first."}
-
-    with trace_path.open("r") as f:
-        trace = json.load(f)
+    trace, error = _load_trace_or_error(video_id)
+    if error:
+        return error
 
     actions = build_execution_plan(trace)
     state = _EXECUTION_STATE.get(video_id, {})

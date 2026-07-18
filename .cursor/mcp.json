@@ -5,7 +5,7 @@
       "command": "python",
       "args": ["agent/mcp_server.py"],
       "env": {
-        "API_BASE": "http://134.199.204.12:8001"
+        "API_BASE": "http://localhost:8001"
       }
     },
     "playwright": {

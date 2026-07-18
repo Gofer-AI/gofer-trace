@@ -17,25 +17,25 @@ Legend: ☐ todo · ◐ started · ☑ done
 > become mechanical instead of risky.
 
 - ☑ **0.1 Formal trace schema.** `schema/trace.schema.json` (v1.0) + example + migration
-  notes. *Done in this change.*
-- ☐ **0.2 Validate-on-write.** `trace_builder.save_trace` validates against the schema
-  and refuses to persist an invalid trace.
-  *Accept:* a malformed trace raises before hitting disk; `example.trace.json` passes.
-- ☐ **0.3 `settings.py` + kill the hardcoded IP.** One env-driven config
-  (`GOFER_PROFILE`, `api_base`, `graph_url`, `vlm`, `blob_root`). Replace
-  `http://134.199.204.12:8001` in `.mcp.json`, `.cursor/mcp.json`, `space/app.py`,
-  `agent/mcp_server.py`.
-  *Accept:* `grep -r 134.199.204.12` returns nothing; app runs with `GOFER_PROFILE=local`
-  against localhost.
-- ☐ **0.4 `KnowledgeBase` interface + `FileKnowledgeBase`.** Define the Protocol from
-  ARCHITECTURE §4; implement it over today's `data/traces/*.json` (no behavior change,
-  just the seam). Route backend + MCP reads/writes through it.
-  *Accept:* `list_workflows()` returns real workflow ids from disk — the first user-visible
-  win, and it makes the MCP tool honest.
-- ☐ **0.5 `v0 → v1` migration helper.** Lift existing flat traces to schema v1.0 (new
-  fields default empty), no VLM re-run.
+  notes.
+- ☑ **0.2 Validate-on-write.** `trace_schema.validate_trace` gates every write;
+  `FileKnowledgeBase.put_trace` (and `trace_builder.save_trace`) refuse to persist an
+  invalid trace. `build_trace` now emits v1.0. *Verified:* a malformed trace raises
+  before hitting disk; `example.trace.json` validates.
+- ☑ **0.3 `settings.py` + killed the hardcoded IP.** Env-driven `Settings`
+  (`GOFER_PROFILE`, `api_base`, `graph_url`, `vlm`, `blob_root`). Removed
+  `http://134.199.204.12:8001` from `.mcp.json`, `.cursor/mcp.json`, `space/app.py`,
+  `agent/mcp_server.py` (defaults to localhost). *Verified:* `grep -r 134.199.204.12`
+  over runtime files is empty.
+- ☑ **0.4 `KnowledgeBase` interface + `FileKnowledgeBase`.** Protocol from ARCHITECTURE
+  §4, implemented over `data/traces/*.json`. Backend reads/writes and MCP go through it;
+  new `GET /workflows` + `GET /search` endpoints. *Verified:* `list_workflows()` returns
+  real workflow ids, and the MCP tool is now honest (plus a new `search_workflows`).
+- ☑ **0.5 `v0 → v1` migration.** `migrate_v0_to_v1` + `scripts/migrate_traces.py`
+  (idempotent, `--dry-run`); legacy files also auto-migrate on read. No VLM re-run.
 
-**Milestone:** one config switch, one storage interface, one validated schema. No graph yet.
+**Milestone (reached):** one config switch, one storage interface, one validated schema.
+No graph yet.
 
 ---
 

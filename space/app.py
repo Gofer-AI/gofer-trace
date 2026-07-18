@@ -8,7 +8,7 @@ import gradio as gr
 import requests
 
 
-API_BASE = os.getenv("API_BASE", "http://134.199.204.12:8001").rstrip("/")
+API_BASE = (os.getenv("GOFER_API_BASE") or os.getenv("API_BASE") or "http://localhost:8001").rstrip("/")
 
 # Module-level session state — single-demo use
 STATE: dict = {

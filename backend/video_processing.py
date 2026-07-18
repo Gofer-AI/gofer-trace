@@ -2,8 +2,11 @@ from pathlib import Path
 import cv2
 
 
-def extract_frames(video_path: str, video_id: str, every_seconds: float = 3.0):
-    output_dir = Path("../data/frames") / video_id
+def extract_frames(video_path: str, video_id: str, every_seconds: float = 3.0, frames_root=None):
+    if frames_root is None:
+        from settings import get_settings
+        frames_root = get_settings().frames_dir
+    output_dir = Path(frames_root) / video_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cap = cv2.VideoCapture(video_path)

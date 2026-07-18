@@ -64,9 +64,16 @@ API_BASE=http://localhost:8001 python app.py
 
 ## Environment variables
 
+Configuration is profile-driven — see `.env.example` and `backend/settings.py`. Every
+value has a safe local default, so `GOFER_PROFILE=local` runs offline against localhost.
+
 | Variable | Default | Description |
 |---|---|---|
-| `API_BASE` | `http://134.199.204.12:8001` | AMD backend URL (set in HF Space secrets) |
+| `GOFER_PROFILE` | `local` | Deployment profile: `local` or `cloud` |
+| `GOFER_API_BASE` / `API_BASE` | `http://localhost:8001` | Backend URL (MCP server + Space); set to your deployed URL in cloud |
+| `GOFER_GRAPH_URL` | `bolt://localhost:7687` | Knowledge-base graph (Phase 1): Memgraph local / Neo4j cloud |
+| `GOFER_VLM` | `Qwen/Qwen2.5-VL-7B-Instruct` | Understanding model id/label |
+| `GOFER_BLOB_ROOT` | `./data` | Filesystem root (local) or object-store prefix (cloud) |
 
 ## Demo flow
 
