@@ -100,13 +100,22 @@ the right workflow. Semantic ranking upgrades further with `sentence-transformer
 
 > Goal: the MCP surface is a drop-in for every target agent, and capture goes beyond upload.
 
-- ☐ **3.1 Agent configs.** Verified MCP config snippets for Claude Code, Cursor, Codex,
-  Hermes; document transport (stdio vs. HTTP) per agent.
-- ☐ **3.2 Planner reads structured `action{}`** instead of keyword-guessing in
-  `planner.py`. *Accept:* execution plan is deterministic from the schema.
-- ☐ **3.3 Live capture client.** Local screen-capture with active-window/URL/input
-  metadata; feed the same Understanding pipeline.
-- ☐ **3.4 Graph explorer UI.** Read-only view of the workflow graph in the Space.
+- ☑ **3.1 Agent configs + HTTP transport.** `docs/AGENTS.md` + ready-to-copy configs in
+  `examples/mcp/` (Claude Code, Cursor, Codex, generic/Hermes, HTTP-remote). MCP server
+  gains `GOFER_MCP_TRANSPORT=stdio|http|sse`. *Verified:* all configs parse; server starts
+  in each transport mode.
+- ☑ **3.2 Planner reads structured `action{}`.** `planner.build_execution_plan` uses the
+  schema's `action{type,target,value,expected_state}` when present, keyword-guessing only
+  for legacy traces. *Verified:* plan is deterministic from the schema; legacy fallback
+  still classifies.
+- ☑ **3.3 Live capture client.** `capture/gofer_capture.py` records the screen (mss +
+  opencv), writes an MP4 + events sidecar, and submits to `/upload`→`/analyze`. Optional
+  deps are lazy so `--help`/`--dry-run` run anywhere. ◐ *Live capture needs a display*
+  (not runnable headlessly here); folding the events sidecar into the trace
+  (`source.kind: "live_capture"`) is the remaining ingestion enhancement.
+- ☑ **3.4 Knowledge Base tab in the Space.** Semantic search + workflow listing in the
+  Gradio UI (the same `/search` agents use). The full node-link graph explorer is
+  Memgraph Lab at `:3000` (shipped in `docker-compose.yml`).
 
 ---
 

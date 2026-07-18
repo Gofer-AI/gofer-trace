@@ -1,0 +1,11 @@
+# OpenAI Codex CLI — add to ~/.codex/config.toml
+# Codex launches MCP servers over stdio, same as Claude Code / Cursor.
+
+[mcp_servers.gofer-trace]
+command = "python"
+args = ["agent/mcp_server.py"]
+env = { API_BASE = "http://localhost:8001" }
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]

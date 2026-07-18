@@ -333,6 +333,47 @@ def generate_sop():
     return r.json().get("sop", "No SOP returned.")
 
 
+def _wf_label(w):
+    return w.get("title") or w.get("goal") or w.get("summary") or "(untitled workflow)"
+
+
+def kb_search(query):
+    if not query.strip():
+        return "Enter a search query."
+    try:
+        r = requests.get(f"{API_BASE}/search", params={"q": query, "k": 8}, timeout=60)
+    except Exception as e:
+        return f"Search failed: {e}"
+    if r.status_code != 200:
+        return f"Search failed ({r.status_code})."
+    results = r.json().get("results", [])
+    if not results:
+        return f"No workflows matched '{query}'."
+    lines = [f"### Results for '{query}'", ""]
+    for w in results:
+        score = w.get("score", "")
+        suffix = f", score {score}" if score != "" else ""
+        lines.append(f"- `{w.get('workflow_id')}` — {_wf_label(w)} "
+                     f"({w.get('step_count', 0)} steps{suffix})")
+    return "\n".join(lines)
+
+
+def kb_list():
+    try:
+        r = requests.get(f"{API_BASE}/workflows", timeout=60)
+    except Exception as e:
+        return f"Failed: {e}"
+    if r.status_code != 200:
+        return f"Failed ({r.status_code})."
+    wf = r.json().get("workflows", [])
+    if not wf:
+        return "No workflows yet. Analyze a recording first."
+    lines = [f"### {len(wf)} workflow(s) in the knowledge base", ""]
+    for w in wf:
+        lines.append(f"- `{w.get('workflow_id')}` — {_wf_label(w)} ({w.get('step_count', 0)} steps)")
+    return "\n".join(lines)
+
+
 def reset_app():
     STATE.update({"video_id": None, "trace": None, "video_url": None})
     return "Reset complete.", None, "", None, "", None, None, [], ""
@@ -393,6 +434,21 @@ with gr.Blocks(css=CSS, title="Gofer Trace") as demo:
                         "<p style='color:#94a3b8'>Analyze a video to see segments.</p>"
                     )
 
+        with gr.Tab("Knowledge Base"):
+            gr.Markdown(
+                "Search across **every** analyzed workflow (semantic). "
+                "The same search powers the `search_workflows` MCP tool your agents use."
+            )
+            with gr.Row():
+                kb_query = gr.Textbox(
+                    placeholder="e.g. deploy to staging",
+                    label="Search workflows", scale=5, lines=1,
+                )
+                kb_btn = gr.Button("Search", scale=1, variant="primary")
+            kb_results = gr.Markdown()
+            kb_refresh = gr.Button("List all workflows")
+            kb_all = gr.Markdown()
+
         with gr.Tab("Workflow Timeline"):
             timeline_out = gr.Markdown()
 
@@ -441,6 +497,10 @@ with gr.Blocks(css=CSS, title="Gofer Trace") as demo:
 
     chat_send.click(fn=_send, inputs=[chat_in, chatbot], outputs=[chatbot, chat_in])
     chat_in.submit(fn=_send, inputs=[chat_in, chatbot], outputs=[chatbot, chat_in])
+
+    kb_btn.click(fn=kb_search, inputs=[kb_query], outputs=[kb_results])
+    kb_query.submit(fn=kb_search, inputs=[kb_query], outputs=[kb_results])
+    kb_refresh.click(fn=kb_list, inputs=[], outputs=[kb_all])
 
 
 demo.launch()

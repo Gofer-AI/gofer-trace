@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "gofer-trace": {
+      "command": "python",
+      "args": ["agent/mcp_server.py"],
+      "env": {
+        "API_BASE": "http://localhost:8001"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}

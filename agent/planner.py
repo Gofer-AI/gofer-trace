@@ -69,7 +69,11 @@ def _extract_target(agent_hint: str, observation: str, action_type: str) -> str:
 
 
 def build_execution_plan(trace: dict) -> list[BrowserAction]:
-    """Convert a workflow trace into an ordered list of BrowserActions."""
+    """Convert a workflow trace into an ordered list of BrowserActions.
+
+    Prefers the structured `action{}` field carried by the schema (deterministic); falls
+    back to keyword classification only for legacy traces that lack it.
+    """
     steps = trace.get("steps", [])
     actions: list[BrowserAction] = []
 
@@ -81,20 +85,29 @@ def build_execution_plan(trace: dict) -> list[BrowserAction]:
         ctx = s.get("window_or_context", "")
         intent = s.get("inferred_intent", "")
 
-        action_type = _classify_action(agent_hint, user_action, observation)
-        target = _extract_target(agent_hint, observation, action_type)
+        structured = s.get("action") or {}
+        structured_type = structured.get("type", "")
+
+        if structured_type and structured_type != "unknown":
+            # Schema-derived, deterministic path.
+            action_type = structured_type
+            target = structured.get("target") or _extract_target(agent_hint, observation, action_type)
+            value = structured.get("value", "")
+            expected_state = structured.get("expected_state") or f"{intent} Context: {ctx}."
+        else:
+            # Legacy fallback: infer from free text.
+            action_type = _classify_action(agent_hint, user_action, observation)
+            target = _extract_target(agent_hint, observation, action_type)
+            value = ""
+            expected_state = f"Browser reflects: {intent} Context: {ctx}."
 
         description = agent_hint or f"{user_action} in {ctx}"
-        expected_state = (
-            f"Browser reflects: {intent} "
-            f"Context: {ctx}."
-        )
 
         actions.append(BrowserAction(
             step_id=step_id,
             action_type=action_type,
             target=target,
-            value="",
+            value=value,
             description=description,
             expected_state=expected_state,
             requires_visual_confirm=True,

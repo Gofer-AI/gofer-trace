@@ -435,4 +435,12 @@ def export_agent_memory(video_id: str) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    # Transport is stdio by default (how Claude Code / Cursor / Codex launch it). Set
+    # GOFER_MCP_TRANSPORT=http (or sse) to serve over HTTP for remote/cloud agents.
+    transport = os.getenv("GOFER_MCP_TRANSPORT", "stdio").lower()
+    if transport in ("http", "streamable-http"):
+        mcp.run(transport="streamable-http")
+    elif transport == "sse":
+        mcp.run(transport="sse")
+    else:
+        mcp.run()

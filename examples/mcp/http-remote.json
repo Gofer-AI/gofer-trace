@@ -1,0 +1,9 @@
+{
+  "_comment": "Remote/HTTP transport. Start the server with GOFER_MCP_TRANSPORT=http python agent/mcp_server.py, then point any MCP client that supports HTTP/streamable-http at its URL. Use this for the cloud profile or when the agent runs on a different machine than the backend.",
+  "mcpServers": {
+    "gofer-trace": {
+      "type": "http",
+      "url": "http://your-host:8000/mcp"
+    }
+  }
+}
