@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "workflow_id": "8f1c2e3a-4b5d-6e7f-8a9b-0c1d2e3f4a5b",
+  "title": "Deploy staging build and smoke-test the login page",
+  "summary": "The user pulled the latest main, ran the deploy script, then opened the staging URL in a browser and verified the login page rendered.",
+  "goal": "Deploy the current build to staging and confirm the login flow works.",
+  "created_at": "2026-07-18T14:32:00Z",
+  "source": {
+    "kind": "screen_recording",
+    "media_uri": "/media/videos/8f1c2e3a.mp4",
+    "duration_sec": 42.0,
+    "fps": 30,
+    "frame_sampling_sec": 8.0
+  },
+  "model": {
+    "vlm": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "profile": "cloud",
+    "compute": "AMD MI300X"
+  },
+  "labels": ["deployment", "ci", "browser", "smoke-test"],
+  "entities": [
+    { "entity_id": "app:terminal", "type": "application", "name": "Terminal", "confidence": 0.95 },
+    { "entity_id": "app:chrome", "type": "application", "name": "Chrome", "confidence": 0.95 },
+    { "entity_id": "cmd:deploy", "type": "command", "name": "./deploy.sh staging", "value": "./deploy.sh staging" },
+    { "entity_id": "url:staging-login", "type": "url", "name": "staging login", "value": "https://staging.example.com/login" }
+  ],
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp_sec": 0.0,
+      "window_or_context": "Terminal / shell session",
+      "observation": "The user runs ./deploy.sh staging and output streams to the terminal.",
+      "user_action": "Running a shell command",
+      "inferred_intent": "Deploy the latest build to the staging environment.",
+      "agent_hint": "Run `./deploy.sh staging` and wait for the 'Deploy complete' line.",
+      "action": {
+        "type": "shell",
+        "target": "./deploy.sh staging",
+        "value": "",
+        "expected_state": "Terminal prints 'Deploy complete' with exit code 0."
+      },
+      "entity_refs": ["app:terminal", "cmd:deploy"],
+      "frame_uri": "/media/frames/8f1c2e3a/frame_0000.jpg",
+      "confidence": 0.88
+    },
+    {
+      "step_id": 2,
+      "timestamp_sec": 24.0,
+      "window_or_context": "Web browser — login page",
+      "observation": "The user opens the staging login URL; the login form renders.",
+      "user_action": "Navigating in the browser",
+      "inferred_intent": "Verify the deploy succeeded by loading the login page.",
+      "agent_hint": "Navigate to the staging login URL and confirm the email/password form is visible.",
+      "action": {
+        "type": "navigate",
+        "target": "https://staging.example.com/login",
+        "value": "",
+        "expected_state": "Login form with email and password fields is visible."
+      },
+      "entity_refs": ["app:chrome", "url:staging-login"],
+      "frame_uri": "/media/frames/8f1c2e3a/frame_0003.jpg",
+      "confidence": 0.9
+    }
+  ],
+  "artifacts": [
+    { "kind": "sop_markdown", "uri": "/media/artifacts/8f1c2e3a/sop.md", "created_at": "2026-07-18T14:32:05Z" },
+    { "kind": "agent_memory_json", "uri": "/media/artifacts/8f1c2e3a/memory.json", "created_at": "2026-07-18T14:32:05Z" }
+  ]
+}
