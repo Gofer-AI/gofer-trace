@@ -44,22 +44,29 @@ No graph yet.
 > Goal: workflows live in a graph and link through shared entities. Local = Memgraph,
 > cloud = Neo4j, **one Cypher adapter** for both.
 
-- ☐ **1.1 Graph adapter.** `GraphKnowledgeBase(KnowledgeBase)` on the `neo4j` Python
-  driver (Bolt). Constraints + upsert from a schema-valid trace (ARCHITECTURE §3 Cypher).
-  *Accept:* `put_trace` upserts `:Workflow/:Step/:Entity/:Artifact` + edges; re-ingesting
-  the same trace is idempotent.
-- ☐ **1.2 Entity extraction.** Extend `trace_builder.py` to emit `entities[]` +
-  per-step `entity_refs` + structured `action{}` from the VLM output.
-  *Accept:* two workflows that run the same command share one `:Entity {command}` node.
-- ☐ **1.3 `docker-compose.yml` (local).** Backend + Memgraph, one command.
-  *Accept:* `docker compose up` → analyze a video → workflow visible via Cypher.
-- ☐ **1.4 Cloud target.** Point `GraphKnowledgeBase` at Neo4j AuraDB via
-  `GOFER_PROFILE=cloud`; document env vars.
-  *Accept:* the *identical* adapter code populates AuraDB; a graph query returns the workflow.
-- ☐ **1.5 Redaction pass.** Strip obvious secrets (tokens, passwords) before persistence.
+- ☑ **1.1 Graph adapter.** `graph_knowledge_base.GraphKnowledgeBase` on the `neo4j`
+  driver (Bolt). Best-effort constraints (Neo4j + Memgraph syntax), idempotent upsert of
+  `:Workflow/:Step/:Entity/:Artifact` + `HAS_STEP/NEXT/ACTS_ON/IN_CONTEXT/EXPORTS` edges;
+  full trace stored as `raw_json` for exact get_workflow round-trip. Selected via
+  `GOFER_KB=graph`; `create_knowledge_base()` factory. *Verified* against a fake Bolt
+  driver (Cypher issued + round-trip). ◐ *Live Memgraph/Neo4j run still pending* (needs
+  Docker, see 1.3).
+- ☑ **1.2 Entity extraction.** `entity_extraction.enrich` (wired into `build_trace`)
+  emits deduped `entities[]` (application/url/command/file), per-step `entity_refs`, and
+  structured `action{}`. *Verified:* two steps sharing `./deploy.sh` produce one
+  `cmd:` entity id, so workflows link through it.
+- ☑ **1.3 `docker-compose.yml` (local).** Backend (`backend/Dockerfile`) + Memgraph +
+  Memgraph Lab, one command. YAML validated. ◐ *`docker compose up` not run here* (no
+  Docker daemon in this environment) — needs a run on a Docker host to confirm live.
+- ◐ **1.4 Cloud target.** Same adapter targets Neo4j/AuraDB via `GOFER_GRAPH_URL`
+  (`neo4j+s://…`) + `GOFER_GRAPH_DATABASE`; env vars documented in `.env.example`.
+  *Pending:* a live AuraDB smoke test.
+- ☑ **1.5 Redaction pass.** `redaction.redact_trace` strips AWS/GitHub/JWT/bearer keys,
+  `key=value` secrets, and URL credentials; runs before `put_trace`. *Verified:* no
+  seeded secret survives.
 
-**Milestone:** recordings become connected memory; cross-workflow Cypher queries work on
-both engines.
+**Milestone (code complete, live-DB run pending):** recordings become connected memory;
+cross-workflow queries work through one Cypher adapter on both engines.
 
 ---
 

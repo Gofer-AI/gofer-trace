@@ -38,9 +38,11 @@ def _env(*names: str, default: str = "") -> str:
 class Settings:
     profile: str          # "local" | "cloud"
     api_base: str         # backend HTTP base (used by MCP server + Space)
+    kb_backend: str       # "file" | "graph"
     graph_url: str        # Bolt URL: Memgraph (local) or Neo4j/AuraDB (cloud)
     graph_user: str
     graph_password: str
+    graph_database: str   # optional named database (Neo4j); blank for Memgraph
     vlm: str              # understanding model id / label
     blob_root: str        # filesystem root (local) or object-store prefix (cloud)
 
@@ -72,9 +74,11 @@ def get_settings() -> Settings:
         profile=profile,
         # API_BASE kept as an accepted name for backward compatibility with existing configs.
         api_base=_env("GOFER_API_BASE", "API_BASE", default=_DEFAULT_API_BASE).rstrip("/"),
+        kb_backend=_env("GOFER_KB", default="file").lower(),
         graph_url=_env("GOFER_GRAPH_URL", default=_DEFAULT_GRAPH_URL),
         graph_user=_env("GOFER_GRAPH_USER", default=""),
         graph_password=_env("GOFER_GRAPH_PASSWORD", default=""),
+        graph_database=_env("GOFER_GRAPH_DATABASE", default=""),
         vlm=_env("GOFER_VLM", default=_DEFAULT_VLM),
         blob_root=_env("GOFER_BLOB_ROOT", default=_DEFAULT_BLOB_ROOT),
     )

@@ -4,6 +4,7 @@ python-multipart
 opencv-python-headless
 Pillow
 jsonschema
+neo4j
 torch
 transformers
 qwen-vl-utils

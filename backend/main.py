@@ -7,7 +7,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "agent"))
 
 from settings import get_settings
-from knowledge_base import FileKnowledgeBase
+from knowledge_base import create_knowledge_base
+from redaction import redact_trace
 from video_processing import extract_frames
 from model_client import analyze_frame_with_qwen as analyze_frame_stub
 from trace_builder import build_trace
@@ -28,9 +29,9 @@ app.add_middleware(
 settings = get_settings()
 settings.ensure_dirs()
 
-# Storage seam — swap FileKnowledgeBase for GraphKnowledgeBase (Phase 1) with no
-# changes to the endpoints below.
-KB = FileKnowledgeBase(settings.traces_dir)
+# Storage seam — FileKnowledgeBase or GraphKnowledgeBase (Memgraph/Neo4j), chosen by
+# GOFER_KB. Endpoints below are identical regardless of backend.
+KB = create_knowledge_base(settings)
 
 app.mount("/media/videos", StaticFiles(directory=str(settings.videos_dir)), name="videos")
 app.mount("/media/frames", StaticFiles(directory=str(settings.frames_dir)), name="frames")
@@ -99,6 +100,7 @@ async def analyze_video(video_id: str):
     model = {"vlm": settings.vlm, "profile": settings.profile}
 
     trace = build_trace(video_id, frame_analyses, source=source, model=model)
+    trace = redact_trace(trace)  # strip obvious secrets before persistence
     KB.put_trace(trace)  # validates against the schema before persisting
 
     return {

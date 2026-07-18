@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import re
 
+from entity_extraction import enrich
 from trace_schema import SCHEMA_VERSION, validate_trace
 
 
@@ -69,6 +70,9 @@ def build_trace(
 
         steps.append(step)
 
+    # Populate structured action{} + entity_refs per step, and the deduped entity list.
+    entities = enrich(steps)
+
     return {
         "schema_version": SCHEMA_VERSION,
         "workflow_id": video_id,
@@ -76,7 +80,7 @@ def build_trace(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source": source or {"kind": "screen_recording"},
         "model": model or {},
-        "entities": [],
+        "entities": entities,
         "steps": steps,
     }
 

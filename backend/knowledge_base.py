@@ -1,18 +1,18 @@
 """
 knowledge_base.py — the storage seam every layer talks to.
 
-`KnowledgeBase` is the interface (docs/ARCHITECTURE.md §4). `FileKnowledgeBase` is the
-local default: it stores schema-valid traces as JSON files under data/traces/ — the same
-layout the app used before, now behind an interface and with validate-on-write.
+`KnowledgeBase` is the interface (docs/ARCHITECTURE.md §4). Two implementations:
+  - `FileKnowledgeBase` — local default: schema-valid traces as JSON under data/traces/.
+  - `GraphKnowledgeBase` (graph_knowledge_base.py) — Bolt/Cypher → Memgraph or Neo4j.
 
-Phase 1 adds `GraphKnowledgeBase` (Bolt/Cypher → Memgraph/Neo4j) implementing the same
-interface; nothing that consumes a KnowledgeBase has to change when we swap it in.
+`create_knowledge_base(settings)` picks one from `GOFER_KB`. Nothing that consumes a
+KnowledgeBase changes when the backend is swapped.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Iterable, Protocol, runtime_checkable
 
 from trace_schema import ensure_v1, validate_trace
 
@@ -26,7 +26,11 @@ class KnowledgeBase(Protocol):
     def similar_steps(self, workflow_id: str, step_id: int) -> list[dict]: ...
 
 
-def _summarize(trace: dict) -> dict:
+# ---------------------------------------------------------------------------
+# Shared helpers (used by both File and Graph implementations)
+# ---------------------------------------------------------------------------
+
+def summarize_trace(trace: dict) -> dict:
     """Compact descriptor of a workflow for listings/search results."""
     return {
         "workflow_id": trace.get("workflow_id", ""),
@@ -39,8 +43,8 @@ def _summarize(trace: dict) -> dict:
     }
 
 
-def _search_blob(trace: dict) -> str:
-    """Concatenated searchable text for a workflow (Phase 0 keyword search)."""
+def search_blob(trace: dict) -> str:
+    """Concatenated searchable text for a workflow (Phase 0/1 keyword search)."""
     parts = [
         trace.get("title", ""),
         trace.get("goal", ""),
@@ -55,8 +59,31 @@ def _search_blob(trace: dict) -> str:
             s.get("inferred_intent", ""),
             s.get("agent_hint", ""),
         ]
+    for e in trace.get("entities", []):
+        parts += [e.get("name", ""), e.get("value", "")]
     return " ".join(p for p in parts if p).lower()
 
+
+def rank_workflows(traces: Iterable[dict], query: str, k: int = 5) -> list[dict]:
+    """Keyword-rank workflows by token frequency. Phase 2 replaces this with embeddings."""
+    tokens = [t for t in query.lower().split() if t]
+    if not tokens:
+        return []
+    scored: list[tuple[int, dict]] = []
+    for trace in traces:
+        blob = search_blob(trace)
+        score = sum(blob.count(tok) for tok in tokens)
+        if score > 0:
+            result = summarize_trace(trace)
+            result["score"] = score
+            scored.append((score, result))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in scored[:k]]
+
+
+# ---------------------------------------------------------------------------
+# Filesystem implementation
+# ---------------------------------------------------------------------------
 
 class FileKnowledgeBase:
     """Filesystem-backed KnowledgeBase: one validated JSON trace per workflow."""
@@ -69,16 +96,13 @@ class FileKnowledgeBase:
         return self.traces_dir / f"{workflow_id}.json"
 
     def put_trace(self, trace: dict) -> None:
-        """Validate against the schema, then persist. Refuses to write an invalid trace."""
         validate_trace(trace)
-        workflow_id = trace["workflow_id"]
-        self._path(workflow_id).write_text(json.dumps(trace, indent=2))
+        self._path(trace["workflow_id"]).write_text(json.dumps(trace, indent=2))
 
     def get_workflow(self, workflow_id: str) -> dict | None:
         path = self._path(workflow_id)
         if not path.exists():
             return None
-        # Legacy files on disk are auto-migrated to v1.0 on read.
         return ensure_v1(json.loads(path.read_text()))
 
     def _iter_traces(self):
@@ -89,24 +113,27 @@ class FileKnowledgeBase:
                 continue
 
     def list_workflows(self) -> list[dict]:
-        return [_summarize(t) for t in self._iter_traces()]
+        return [summarize_trace(t) for t in self._iter_traces()]
 
     def search(self, query: str, k: int = 5) -> list[dict]:
-        """Keyword search over workflow text. Phase 2 replaces this with embeddings."""
-        tokens = [t for t in query.lower().split() if t]
-        if not tokens:
-            return []
-        scored: list[tuple[int, dict]] = []
-        for trace in self._iter_traces():
-            blob = _search_blob(trace)
-            score = sum(blob.count(tok) for tok in tokens)
-            if score > 0:
-                result = _summarize(trace)
-                result["score"] = score
-                scored.append((score, result))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [r for _, r in scored[:k]]
+        return rank_workflows(self._iter_traces(), query, k)
 
     def similar_steps(self, workflow_id: str, step_id: int) -> list[dict]:
-        # Requires embeddings (Phase 2). Interface is defined now so callers are stable.
-        return []
+        return []  # requires embeddings (Phase 2)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def create_knowledge_base(settings) -> KnowledgeBase:
+    """Build the KnowledgeBase for the current profile (GOFER_KB=file|graph)."""
+    if getattr(settings, "kb_backend", "file") == "graph":
+        from graph_knowledge_base import GraphKnowledgeBase
+        return GraphKnowledgeBase(
+            settings.graph_url,
+            user=settings.graph_user,
+            password=settings.graph_password,
+            database=getattr(settings, "graph_database", "") or None,
+        )
+    return FileKnowledgeBase(settings.traces_dir)
