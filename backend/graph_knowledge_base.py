@@ -69,7 +69,9 @@ class GraphKnowledgeBase:
 
     # -- writes -------------------------------------------------------------
 
-    def put_trace(self, trace: dict) -> None:
+    def put_trace(self, trace: dict, owner: str | None = None) -> None:
+        if owner is not None:
+            trace["owner"] = owner
         validate_trace(trace)
         with self._session() as session:
             session.execute_write(self._write_trace_tx, trace, json.dumps(trace))
@@ -85,11 +87,12 @@ class GraphKnowledgeBase:
             """
             MERGE (w:Workflow {id: $id})
             SET w.title = $title, w.goal = $goal, w.summary = $summary,
-                w.created_at = $created_at, w.labels = $labels, w.raw_json = $raw
+                w.created_at = $created_at, w.labels = $labels, w.owner = $owner,
+                w.raw_json = $raw
             """,
             id=wid, title=trace.get("title", ""), goal=trace.get("goal", ""),
             summary=trace.get("summary", ""), created_at=trace.get("created_at", ""),
-            labels=trace.get("labels", []), raw=raw_json,
+            labels=trace.get("labels", []), owner=trace.get("owner", ""), raw=raw_json,
         )
 
         # Idempotency: rebuild this workflow's steps from scratch on every write.
@@ -171,26 +174,32 @@ class GraphKnowledgeBase:
 
     # -- reads --------------------------------------------------------------
 
-    def get_workflow(self, workflow_id: str) -> dict | None:
+    def get_workflow(self, workflow_id: str, owner: str | None = None) -> dict | None:
         rows = self._run(
             "MATCH (w:Workflow {id: $id}) RETURN w.raw_json AS j", id=workflow_id
         )
         if not rows or not rows[0].get("j"):
             return None
-        return ensure_v1(json.loads(rows[0]["j"]))
+        trace = ensure_v1(json.loads(rows[0]["j"]))
+        if owner is not None and trace.get("owner") != owner:
+            return None
+        return trace
 
-    def _all_traces(self):
+    def _all_traces(self, owner: str | None = None):
         rows = self._run(
             "MATCH (w:Workflow) WHERE w.raw_json IS NOT NULL "
             "RETURN w.raw_json AS j ORDER BY w.created_at"
         )
-        return [ensure_v1(json.loads(r["j"])) for r in rows if r.get("j")]
+        traces = (ensure_v1(json.loads(r["j"])) for r in rows if r.get("j"))
+        if owner is not None:
+            return [t for t in traces if t.get("owner") == owner]
+        return list(traces)
 
-    def list_workflows(self) -> list[dict]:
-        return [summarize_trace(t) for t in self._all_traces()]
+    def list_workflows(self, owner: str | None = None) -> list[dict]:
+        return [summarize_trace(t) for t in self._all_traces(owner)]
 
-    def search(self, query: str, k: int = 5) -> list[dict]:
-        return rank_workflows(self._all_traces(), query, k)
+    def search(self, query: str, k: int = 5, owner: str | None = None) -> list[dict]:
+        return rank_workflows(self._all_traces(owner), query, k)
 
     def similar_steps(self, workflow_id: str, step_id: int) -> list[dict]:
         return []  # requires embeddings (Phase 2)

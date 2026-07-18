@@ -48,6 +48,22 @@ class Settings:
     embeddings: str       # "hashing" (offline default) | "sentence-transformers"
     embedding_model: str  # model id when embeddings=sentence-transformers
     embedding_dim: int    # vector dim for the hashing embedder
+    require_auth: bool    # enforce API-key auth + per-user scoping (default: cloud only)
+    api_keys_raw: str     # "key:user,key2:user2" or "key,key2" (principal defaults to key)
+    blob_store: str       # "local" | "s3"
+    async_ingest: bool    # run /analyze in the background by default
+
+    @property
+    def api_keys(self) -> dict:
+        """Map of api_key -> principal. Empty when none configured."""
+        out: dict[str, str] = {}
+        for item in self.api_keys_raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            key, _, principal = item.partition(":")
+            out[key.strip()] = (principal.strip() or key.strip())
+        return out
 
     @property
     def is_cloud(self) -> bool:
@@ -96,4 +112,9 @@ def get_settings() -> Settings:
         embeddings=_env("GOFER_EMBEDDINGS", default="hashing").lower(),
         embedding_model=_env("GOFER_EMBEDDING_MODEL", default="all-MiniLM-L6-v2"),
         embedding_dim=int(_env("GOFER_EMBEDDING_DIM", default="256")),
+        # Auth defaults on for cloud, off for local — local stays single-user and unchanged.
+        require_auth=_env("GOFER_REQUIRE_AUTH", default=("true" if profile == "cloud" else "false")).lower() == "true",
+        api_keys_raw=_env("GOFER_API_KEYS", default=""),
+        blob_store=_env("GOFER_BLOB_STORE", default="local").lower(),
+        async_ingest=_env("GOFER_ASYNC_INGEST", default="false").lower() == "true",
     )

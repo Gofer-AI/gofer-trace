@@ -19,10 +19,11 @@ from trace_schema import ensure_v1, validate_trace
 
 @runtime_checkable
 class KnowledgeBase(Protocol):
-    def put_trace(self, trace: dict) -> None: ...
-    def get_workflow(self, workflow_id: str) -> dict | None: ...
-    def list_workflows(self) -> list[dict]: ...
-    def search(self, query: str, k: int = 5) -> list[dict]: ...
+    # `owner` scopes multi-user access; None means no scoping (local single-user).
+    def put_trace(self, trace: dict, owner: str | None = None) -> None: ...
+    def get_workflow(self, workflow_id: str, owner: str | None = None) -> dict | None: ...
+    def list_workflows(self, owner: str | None = None) -> list[dict]: ...
+    def search(self, query: str, k: int = 5, owner: str | None = None) -> list[dict]: ...
     def similar_steps(self, workflow_id: str, step_id: int) -> list[dict]: ...
 
 
@@ -95,28 +96,36 @@ class FileKnowledgeBase:
     def _path(self, workflow_id: str) -> Path:
         return self.traces_dir / f"{workflow_id}.json"
 
-    def put_trace(self, trace: dict) -> None:
+    def put_trace(self, trace: dict, owner: str | None = None) -> None:
+        if owner is not None:
+            trace["owner"] = owner
         validate_trace(trace)
         self._path(trace["workflow_id"]).write_text(json.dumps(trace, indent=2))
 
-    def get_workflow(self, workflow_id: str) -> dict | None:
+    def get_workflow(self, workflow_id: str, owner: str | None = None) -> dict | None:
         path = self._path(workflow_id)
         if not path.exists():
             return None
-        return ensure_v1(json.loads(path.read_text()))
+        trace = ensure_v1(json.loads(path.read_text()))
+        if owner is not None and trace.get("owner") != owner:
+            return None
+        return trace
 
-    def _iter_traces(self):
+    def _iter_traces(self, owner: str | None = None):
         for path in sorted(self.traces_dir.glob("*.json")):
             try:
-                yield ensure_v1(json.loads(path.read_text()))
+                trace = ensure_v1(json.loads(path.read_text()))
             except (json.JSONDecodeError, OSError):
                 continue
+            if owner is not None and trace.get("owner") != owner:
+                continue
+            yield trace
 
-    def list_workflows(self) -> list[dict]:
-        return [summarize_trace(t) for t in self._iter_traces()]
+    def list_workflows(self, owner: str | None = None) -> list[dict]:
+        return [summarize_trace(t) for t in self._iter_traces(owner)]
 
-    def search(self, query: str, k: int = 5) -> list[dict]:
-        return rank_workflows(self._iter_traces(), query, k)
+    def search(self, query: str, k: int = 5, owner: str | None = None) -> list[dict]:
+        return rank_workflows(self._iter_traces(owner), query, k)
 
     def similar_steps(self, workflow_id: str, step_id: int) -> list[dict]:
         return []  # requires embeddings (Phase 2)

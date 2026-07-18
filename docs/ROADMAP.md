@@ -121,16 +121,33 @@ the right workflow. Semantic ranking upgrades further with `sentence-transformer
 
 ## Phase 4 — Cloud hardening (only for the hosted version)
 
-- ☐ **4.1 AuthN/Z + per-user workflow scoping** on every graph query.
-- ☐ **4.2 Object storage (S3/R2)** for videos/frames/artifacts + signed URLs.
-- ☐ **4.3 Async ingestion** (queue/worker) so long VLM analysis doesn't block requests.
-- ☐ **4.4 Observability** — request/inference metrics, trace-count dashboards.
+- ☑ **4.1 AuthN/Z + per-user workflow scoping.** `auth.py` (API keys → principal;
+  `Authorization: Bearer` / `X-API-Key`), enforced automatically in the cloud profile and
+  off in local (single-user, unchanged). `KnowledgeBase` reads/writes take an `owner`; the
+  `owner` field is on the trace + `:Workflow`. *Verified:* alice/bob see only their own
+  workflows; bad key → 401. ◐ *Owner filter is applied in the adapter; pushing it into the
+  Cypher query is a follow-up.*
+- ◐ **4.2 Object storage (S3/R2).** `blob_store.py` — `BlobStore` interface + `LocalBlobStore`
+  + `S3BlobStore` (boto3, presigned/public URLs), chosen by `GOFER_BLOB_STORE`. *Verified:*
+  local round-trip. *Pending:* wiring video/frame writes through it (OpenCV needs a local
+  path; artifacts are the current integration point) + a live S3/R2 run.
+- ☑ **4.3 Async ingestion.** `jobs.py` in-process job store + FastAPI BackgroundTasks;
+  `POST /analyze?background=true` (or `GOFER_ASYNC_INGEST=true`) returns a `job_id`, polled
+  at `/jobs/{id}`. *Verified:* queued→running→done/error state machine. ◐ *Durable
+  queue/worker (survives restart) is the production step.*
+- ☑ **4.4 Observability.** `metrics.py` request/latency/error counters + middleware,
+  exposed at `/metrics`. *Verified:* counts requests and 5xx per path. ◐ *Prometheus/OTel
+  export is the next step.*
+
+**Milestone (code complete):** the cloud profile authenticates callers, scopes workflows
+per user, can ingest asynchronously, and reports basic metrics.
 
 ---
 
-## Suggested first PR after this one
+## Verifying a real deployment
 
-Phase 0.2–0.4 together: **validate-on-write + `settings.py` + `KnowledgeBase`/
-`FileKnowledgeBase`.** Small, no new infrastructure, removes the hardcoded IP, and makes
-`list_workflows()` actually work — immediate, demoable value and the seam every later
-phase plugs into.
+Offline logic is covered by `tests/test_gofer.py` (run in CI on every PR). The
+infrastructure-dependent items above (live Memgraph/Neo4j, S3, sentence-transformers,
+screen capture, an agent over MCP) have a step-by-step host checklist in
+[SMOKE_TEST.md](./SMOKE_TEST.md), plus `scripts/smoke_test.py` to exercise a running
+backend end-to-end.

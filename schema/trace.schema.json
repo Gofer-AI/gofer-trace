@@ -87,6 +87,10 @@
       "description": "Free-form tags for retrieval/filtering (e.g. ['deployment', 'ci', 'browser']).",
       "items": { "type": "string" }
     },
+    "owner": {
+      "type": "string",
+      "description": "Principal that owns this workflow (cloud multi-user scoping). Set by the backend from the authenticated caller; blank/absent in the single-user local profile."
+    },
     "entities": {
       "type": "array",
       "description": "De-duplicated entities referenced across steps (apps, files, URLs, artifacts). Promoted to shared :Entity nodes in the graph so workflows that touch the same tool/file are linked.",
