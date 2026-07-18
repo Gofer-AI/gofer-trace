@@ -1,9 +1,8 @@
 {
   "mcpServers": {
     "gofer-trace": {
-      "type": "stdio",
       "command": "python",
-      "args": ["${workspaceFolder}/agent/mcp_server.py"],
+      "args": ["agent/mcp_server.py"],
       "env": {
         "API_BASE": "http://localhost:8001"
       }

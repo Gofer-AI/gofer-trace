@@ -12,14 +12,17 @@ Setup:
 
 Claude Code (.mcp.json):
   {"mcpServers": {"gofer-trace": {"type":"stdio","command":"python",
-    "args":["agent/mcp_server.py"],"env":{"API_BASE":"http://134.199.204.12:8001"}}}}
+    "args":["agent/mcp_server.py"],"env":{"API_BASE":"http://localhost:8001"}}}}
+
+Set API_BASE (or GOFER_API_BASE) to point at your backend — localhost for the local
+profile, your deployed URL for the cloud profile.
 """
 import os
 import json
 import requests
 from mcp.server.fastmcp import FastMCP
 
-API_BASE = os.getenv("API_BASE", "http://134.199.204.12:8001").rstrip("/")
+API_BASE = (os.getenv("GOFER_API_BASE") or os.getenv("API_BASE") or "http://localhost:8001").rstrip("/")
 
 mcp = FastMCP("Gofer Trace")
 
@@ -54,21 +57,58 @@ def _post(path: str, body: dict | None = None) -> dict:
 @mcp.tool()
 def list_workflows() -> str:
     """
-    List all analyzed workflows available for agent execution.
-    Returns workflow IDs and step counts. Call this first to find a video_id.
+    List all analyzed workflows in the knowledge base.
+    Returns each workflow's id, title/goal, and step count. Call this first to find a
+    video_id, then load_workflow(video_id) to load its full context.
     """
-    data = _get("/")
+    data = _get("/workflows")
     if "error" in data:
         return f"Backend unreachable: {data['error']}\nEnsure API_BASE={API_BASE} is correct."
 
-    # Scan traces directory via backend status, then list known files
-    # We call root just to confirm connectivity, then return guidance
-    return (
-        f"Gofer Trace backend is running at {API_BASE}.\n\n"
-        "To find available workflows, check the Gofer Trace UI after uploading and analyzing a video. "
-        "The video_id is displayed in the status box after analysis.\n\n"
-        "Once you have a video_id, call load_workflow(video_id) to load its context."
-    )
+    workflows = data.get("workflows", [])
+    if not workflows:
+        return (
+            "No workflows found yet. Upload and analyze a recording in the Gofer Trace UI "
+            "(or POST /analyze/{video_id}), then call list_workflows again."
+        )
+
+    lines = [f"# Workflows ({len(workflows)})", ""]
+    for w in workflows:
+        label = w.get("title") or w.get("goal") or w.get("summary") or "(untitled workflow)"
+        lines.append(
+            f"- `{w.get('workflow_id')}` — {label} "
+            f"({w.get('step_count', 0)} steps)"
+        )
+    lines += ["", "Call `load_workflow(video_id)` to load one, or `search_workflows(query)` to find by intent."]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def search_workflows(query: str, k: int = 5) -> str:
+    """
+    Find workflows by intent/keywords across every recording in the knowledge base.
+    Use this when you don't have a video_id — e.g. "deploy to staging", "reset a password".
+
+    Args:
+        query: What you're looking for (natural language keywords).
+        k: Max number of results to return.
+    """
+    data = _get(f"/search?q={requests.utils.quote(query)}&k={k}")
+    if "error" in data:
+        return f"Search failed: {data['error']}"
+
+    results = data.get("results", [])
+    if not results:
+        return f"No workflows matched '{query}'. Try broader keywords or list_workflows()."
+
+    lines = [f"# Search results for '{query}' ({len(results)})", ""]
+    for r in results:
+        label = r.get("title") or r.get("goal") or r.get("summary") or "(untitled workflow)"
+        lines.append(
+            f"- `{r.get('workflow_id')}` — {label} "
+            f"({r.get('step_count', 0)} steps, score {r.get('score', 0)})"
+        )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -307,5 +347,100 @@ def ask_workflow(video_id: str, question: str) -> str:
     return result.get("answer", "No answer returned.")
 
 
+# ---------------------------------------------------------------------------
+# Semantic retrieval (Phase 2)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_similar_steps(video_id: str, step_id: int, k: int = 5) -> str:
+    """
+    Find steps across all recordings that are semantically similar to a given step.
+    Use this to reuse how something was done elsewhere ("where else did I do this?").
+
+    Args:
+        video_id: The workflow the step belongs to.
+        step_id: The step number to find neighbors for.
+        k: Max number of similar steps to return.
+    """
+    data = _get(f"/similar-steps/{video_id}/{step_id}?k={k}")
+    if "error" in data:
+        return f"Lookup failed: {data['error']}"
+    similar = data.get("similar", [])
+    if not similar:
+        return "No similar steps found (the index may be empty or this step is unique)."
+
+    lines = [f"# Steps similar to {video_id} step {step_id}", ""]
+    for s in similar:
+        lines.append(
+            f"- `{s.get('workflow_id')}` step {s.get('step_id')} "
+            f"(score {s.get('score')}) — {s.get('window_or_context','')}: "
+            f"{s.get('inferred_intent') or s.get('user_action','')}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_step_context(video_id: str, step_id: int) -> str:
+    """
+    Get a step's neighborhood: entities it touches, the previous/next step, and
+    semantically similar steps elsewhere. Use this to understand a step before replaying it.
+
+    Args:
+        video_id: The workflow id.
+        step_id: The step number to inspect.
+    """
+    data = _get(f"/step-context/{video_id}/{step_id}")
+    if "error" in data:
+        return f"Lookup failed: {data['error']}"
+
+    step = data.get("step", {})
+    entities = data.get("entities", [])
+    action = step.get("action", {}) or {}
+    lines = [
+        f"# Step {step_id} context — {video_id}",
+        f"**Context:** {step.get('window_or_context','')}",
+        f"**Intent:** {step.get('inferred_intent','')}",
+        f"**Action:** {action.get('type','')} → `{action.get('target','')}`",
+        f"**Expected:** {action.get('expected_state','')}",
+        "",
+        f"**Neighbors:** prev={data.get('previous_step_id')} · next={data.get('next_step_id')}",
+        "",
+        "**Entities touched:**",
+    ]
+    lines += [f"- {e.get('type')}: {e.get('name')}" for e in entities] or ["- (none)"]
+    similar = data.get("similar_steps", [])
+    if similar:
+        lines += ["", "**Similar steps elsewhere:**"]
+        lines += [f"- `{s['workflow_id']}` step {s['step_id']} (score {s['score']})" for s in similar]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def export_agent_memory(video_id: str) -> str:
+    """
+    Generate and persist reusable agent memory for a workflow: a deterministic SOP
+    (markdown) and the agent-memory JSON, attached as first-class artifacts.
+
+    Args:
+        video_id: The workflow id to export.
+    """
+    data = _post(f"/export/{video_id}")
+    if "error" in data:
+        return f"Export failed: {data['error']}"
+    artifacts = data.get("artifacts", [])
+    lines = [f"✅ Exported agent memory for **{video_id}**:", ""]
+    for a in artifacts:
+        lines.append(f"- **{a.get('kind')}** → `{a.get('uri')}`")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
-    mcp.run()
+    # Transport is stdio by default (how Claude Code / Cursor / Codex launch it). Set
+    # GOFER_MCP_TRANSPORT=http (or sse) to serve over HTTP for remote/cloud agents.
+    transport = os.getenv("GOFER_MCP_TRANSPORT", "stdio").lower()
+    if transport in ("http", "streamable-http"):
+        mcp.run(transport="streamable-http")
+    elif transport == "sse":
+        mcp.run(transport="sse")
+    else:
+        mcp.run()

@@ -1,0 +1,6 @@
+mss
+opencv-python
+numpy
+requests
+# Optional: active-window titles in the events sidecar.
+pygetwindow; platform_system != "Linux"

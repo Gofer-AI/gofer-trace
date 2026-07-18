@@ -3,6 +3,9 @@ uvicorn[standard]
 python-multipart
 opencv-python-headless
 Pillow
+jsonschema
+neo4j
+boto3
 torch
 transformers
 qwen-vl-utils

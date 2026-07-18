@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gofer.ai/schema/trace.schema.json",
+  "title": "Gofer Trace — Workflow Memory Schema",
+  "description": "Canonical, versioned schema for a captured human workflow. This is the contract between the capture/understanding layer, the knowledge base, and every MCP-connected agent (Claude Code, Cursor, Codex, Hermes). Every trace written to disk, loaded into the graph, or served over MCP MUST validate against this schema. Nodes/edges in the knowledge graph are derived directly from these objects (see docs/ARCHITECTURE.md#graph-model).",
+  "type": "object",
+  "required": ["schema_version", "workflow_id", "created_at", "source", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Semantic version of this schema. Consumers MUST check this before parsing. Bump minor for additive fields, major for breaking changes."
+    },
+    "workflow_id": {
+      "type": "string",
+      "description": "Stable unique id for the workflow (UUID). Becomes the :Workflow node id in the graph.",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable name, e.g. 'Deploy staging build and smoke-test'. Populated by the model or the user."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-paragraph natural-language summary of what the user accomplished."
+    },
+    "goal": {
+      "type": "string",
+      "description": "The inferred top-level objective of the workflow. Used as the primary retrieval key by agents ('find a workflow that does X')."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp when the trace was built."
+    },
+    "source": {
+      "type": "object",
+      "description": "Provenance of the recording the trace was derived from.",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["screen_recording", "live_capture", "imported"],
+          "description": "How the raw signal was obtained. 'screen_recording' = uploaded video (today's path); 'live_capture' = continuous capture client (roadmap)."
+        },
+        "media_uri": {
+          "type": "string",
+          "description": "URI of the source video. Local profile: file path or /media/videos/... ; Cloud profile: object-store URL (s3://, https://...)."
+        },
+        "duration_sec": { "type": "number", "minimum": 0 },
+        "fps": { "type": "number", "minimum": 0 },
+        "frame_sampling_sec": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Interval between sampled frames during understanding (matches video_processing.extract_frames)."
+        },
+        "capture_host": {
+          "type": "string",
+          "description": "Optional label for the machine/user the capture came from (cloud multi-user)."
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "description": "Which understanding model produced the analysis. Lets agents weight confidence and lets you diff stub vs. real-VLM traces.",
+      "additionalProperties": false,
+      "properties": {
+        "vlm": {
+          "type": "string",
+          "description": "e.g. 'Qwen/Qwen2.5-VL-7B-Instruct' or 'heuristic-stub'."
+        },
+        "profile": {
+          "type": "string",
+          "enum": ["local", "cloud"],
+          "description": "Which deployment profile generated this trace."
+        },
+        "compute": {
+          "type": "string",
+          "description": "Free-form compute label, e.g. 'AMD MI300X', 'local-cuda', 'cpu-stub'."
+        }
+      }
+    },
+    "labels": {
+      "type": "array",
+      "description": "Free-form tags for retrieval/filtering (e.g. ['deployment', 'ci', 'browser']).",
+      "items": { "type": "string" }
+    },
+    "owner": {
+      "type": "string",
+      "description": "Principal that owns this workflow (cloud multi-user scoping). Set by the backend from the authenticated caller; blank/absent in the single-user local profile."
+    },
+    "entities": {
+      "type": "array",
+      "description": "De-duplicated entities referenced across steps (apps, files, URLs, artifacts). Promoted to shared :Entity nodes in the graph so workflows that touch the same tool/file are linked.",
+      "items": { "$ref": "#/$defs/entity" }
+    },
+    "steps": {
+      "type": "array",
+      "description": "Ordered workflow steps, one per analyzed segment/frame. Each becomes a :Step node with a NEXT edge to its successor.",
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "artifacts": {
+      "type": "array",
+      "description": "Derived exports attached to this workflow (SOP markdown, agent-memory JSON, segment-launcher HTML).",
+      "items": { "$ref": "#/$defs/artifact" }
+    }
+  },
+  "$defs": {
+    "entity": {
+      "type": "object",
+      "required": ["entity_id", "type", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "entity_id": {
+          "type": "string",
+          "description": "Stable id, ideally derived from a normalized key so the same tool/file dedupes across workflows (e.g. sha1('app:vscode'))."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["application", "file", "url", "ui_element", "command", "credential_ref", "data_object", "person", "other"],
+          "description": "Entity kind. 'credential_ref' is a *reference* only — never store secrets in a trace."
+        },
+        "name": { "type": "string", "description": "Display name, e.g. 'VS Code', 'main.py', 'https://console.aws.amazon.com'." },
+        "value": { "type": "string", "description": "Optional canonical value (a URL, a file path, a command string)." },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": ["step_id", "timestamp_sec", "window_or_context"],
+      "additionalProperties": false,
+      "properties": {
+        "step_id": { "type": "integer", "minimum": 1, "description": "1-based ordinal within the workflow." },
+        "timestamp_sec": { "type": "number", "minimum": 0, "description": "Offset into the source recording." },
+        "window_or_context": { "type": "string", "description": "The active app/screen context, e.g. 'Code editor — Python file open'." },
+        "observation": { "type": "string", "description": "What the model saw in the frame." },
+        "user_action": { "type": "string", "description": "The action the user performed, e.g. 'Running a shell command'." },
+        "inferred_intent": { "type": "string", "description": "Why the user did it — the reasoning an agent needs to generalize." },
+        "agent_hint": { "type": "string", "description": "Concrete instruction for an agent replaying this step." },
+        "action": {
+          "type": "object",
+          "description": "Structured, machine-executable form of user_action. Consumed by planner.py to build BrowserActions. Optional today; required for autonomous execution.",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["navigate", "click", "type", "shell", "screenshot", "verify", "wait", "unknown"],
+              "description": "Executable action class. Mirrors planner.BrowserAction.action_type."
+            },
+            "target": { "type": "string", "description": "URL, selector, element description, or command." },
+            "value": { "type": "string", "description": "Text to type / payload (empty for non-type actions)." },
+            "expected_state": { "type": "string", "description": "What should be true after the action — the assertion Qwen visual-verify checks." }
+          }
+        },
+        "entity_refs": {
+          "type": "array",
+          "description": "entity_id values this step touches. Materialized as :Step-[:ACTS_ON]->:Entity edges.",
+          "items": { "type": "string" }
+        },
+        "frame_uri": { "type": "string", "description": "URI of the sampled frame image for this step." },
+        "embedding_ref": {
+          "type": "string",
+          "description": "Optional id/pointer into the vector index for this step's text embedding (semantic search)."
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "raw_model_output": { "type": "string", "description": "Unparsed model text, kept for auditing/debugging." }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["kind", "uri"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["sop_markdown", "agent_memory_json", "segment_launcher_html", "other"],
+          "description": "Type of derived export."
+        },
+        "uri": { "type": "string", "description": "Where the artifact lives (local path or object-store URL)." },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

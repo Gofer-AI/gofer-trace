@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Header, BackgroundTasks, Depends
+import time
 from pathlib import Path
 import shutil
 import uuid
@@ -6,9 +7,17 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "agent"))
 
+from settings import get_settings
+from knowledge_base import create_knowledge_base
+from semantic_index import create_semantic_index
+from redaction import redact_trace
 from video_processing import extract_frames
 from model_client import analyze_frame_with_qwen as analyze_frame_stub
-from trace_builder import build_trace, save_trace
+from trace_builder import build_trace
+from auth import resolve_principal, owner_for, AuthError
+from jobs import JobStore
+from metrics import Metrics
+from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Gofer Trace API")
 
@@ -23,11 +32,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/media/videos", StaticFiles(directory="../data/videos"), name="videos")
-app.mount("/media/frames", StaticFiles(directory="../data/frames"), name="frames")
+settings = get_settings()
+settings.ensure_dirs()
 
-VIDEO_DIR = Path("../data/videos")
-VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+# Storage seam — FileKnowledgeBase or GraphKnowledgeBase (Memgraph/Neo4j), chosen by
+# GOFER_KB. Endpoints below are identical regardless of backend.
+KB = create_knowledge_base(settings)
+# Semantic retrieval layer (embeddings + vector index), independent of the KB backend.
+SEM = create_semantic_index(settings)
+JOBS = JobStore()
+METRICS = Metrics()
+
+
+def principal(authorization: str = Header(default=""),
+              x_api_key: str = Header(default="")) -> str:
+    """FastAPI dependency: resolve the caller. In local profile always 'local'."""
+    return resolve_principal(settings, authorization, x_api_key)
+
+
+@app.exception_handler(AuthError)
+async def _auth_error_handler(request, exc: AuthError):
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+
+
+@app.middleware("http")
+async def _metrics_middleware(request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    METRICS.record(request.url.path, response.status_code, time.time() - start)
+    return response
+
+app.mount("/media/videos", StaticFiles(directory=str(settings.videos_dir)), name="videos")
+app.mount("/media/frames", StaticFiles(directory=str(settings.frames_dir)), name="frames")
+app.mount("/media/artifacts", StaticFiles(directory=str(settings.artifacts_dir)), name="artifacts")
+
+VIDEO_DIR = settings.videos_dir
 
 
 @app.get("/")
@@ -35,8 +74,38 @@ def root():
     return {
         "app": "Gofer Trace",
         "status": "running",
+        "profile": settings.profile,
+        "auth_required": settings.require_auth,
         "message": "Upload a workflow recording, analyze it, and generate agent memory."
     }
+
+
+@app.get("/metrics")
+def metrics():
+    """In-process request/latency counters."""
+    return METRICS.snapshot()
+
+
+@app.get("/workflows")
+def list_workflows(who: str = Depends(principal)):
+    """List analyzed workflows visible to the caller."""
+    return {"workflows": KB.list_workflows(owner=owner_for(settings, who))}
+
+
+@app.get("/search")
+def search_workflows(q: str, k: int = 5, who: str = Depends(principal)):
+    """Semantic workflow search over embeddings; falls back to keyword when unindexed."""
+    owner = owner_for(settings, who)
+    hits = SEM.search_workflows(q, k)
+    results = []
+    for h in hits:
+        trace = KB.get_workflow(h["workflow_id"], owner=owner)
+        if trace:
+            from knowledge_base import summarize_trace
+            results.append({**summarize_trace(trace), "score": h["score"]})
+    if not results:
+        results = KB.search(q, k, owner=owner)  # keyword fallback (empty index / no owned hits)
+    return {"query": q, "results": results}
 
 
 @app.post("/upload")
@@ -55,29 +124,68 @@ async def upload_video(file: UploadFile = File(...)):
         "video_url": f"/media/videos/{video_id}{suffix}"
     }
 
-@app.post("/analyze/{video_id}")
-async def analyze_video(video_id: str):
+def _run_analysis(video_id: str, owner: str | None) -> dict:
+    """The full understanding → index → persist pipeline. Used sync and in the background."""
     matches = list(VIDEO_DIR.glob(f"{video_id}.*"))
     if not matches:
         return {"error": "video not found", "video_id": video_id}
 
     video_path = str(matches[0])
-    frames = extract_frames(video_path, video_id, every_seconds=8.0)
+    frame_sampling_sec = 8.0
+    frames = extract_frames(video_path, video_id, every_seconds=frame_sampling_sec)
 
     frame_analyses = [
         analyze_frame_stub(frame["path"], frame["timestamp_sec"])
         for frame in frames
     ]
 
-    trace = build_trace(video_id, frame_analyses)
-    trace_path = save_trace(video_id, trace)
+    source = {
+        "kind": "screen_recording",
+        "media_uri": f"/media/videos/{matches[0].name}",
+        "frame_sampling_sec": frame_sampling_sec,
+    }
+    model = {"vlm": settings.vlm, "profile": settings.profile}
+
+    trace = build_trace(video_id, frame_analyses, source=source, model=model)
+    trace = redact_trace(trace)          # strip obvious secrets before persistence
+    SEM.index_trace(trace)               # embed workflow + steps; sets steps[].embedding_ref
+    KB.put_trace(trace, owner=owner)     # validates against the schema before persisting
 
     return {
         "video_id": video_id,
         "frames_extracted": len(frames),
-        "trace_path": trace_path,
-        "trace": trace
+        "trace_path": str(settings.traces_dir / f"{video_id}.json"),
+        "trace": trace,
     }
+
+
+def _run_analysis_job(job_id: str, video_id: str, owner: str | None) -> None:
+    JOBS.update(job_id, "running")
+    try:
+        result = _run_analysis(video_id, owner)
+        if "error" in result:
+            JOBS.update(job_id, "error", error=result["error"])
+        else:
+            JOBS.update(job_id, "done", result=result)
+    except Exception as e:  # noqa: BLE001 — surface any pipeline failure to the job
+        JOBS.update(job_id, "error", error=str(e))
+
+
+@app.post("/analyze/{video_id}")
+async def analyze_video(video_id: str, background_tasks: BackgroundTasks,
+                        background: bool = False, who: str = Depends(principal)):
+    owner = owner_for(settings, who)
+    if background or settings.async_ingest:
+        job_id = JOBS.create(video_id)
+        background_tasks.add_task(_run_analysis_job, job_id, video_id, owner)
+        return {"video_id": video_id, "job_id": job_id, "status": "queued"}
+    return _run_analysis(video_id, owner)
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    """Poll an asynchronous analysis job."""
+    return JOBS.get(job_id) or {"error": "job not found", "job_id": job_id}
 
 from pydantic import BaseModel
 import json
@@ -87,38 +195,31 @@ class AskRequest(BaseModel):
     question: str
 
 
-@app.get("/trace/{video_id}")
-async def get_trace(video_id: str):
-    trace_path = Path("../data/traces") / f"{video_id}.json"
-
-    if not trace_path.exists():
-        return {
+def _load_trace_or_error(video_id: str, owner: str | None = None):
+    """Return (trace, None) or (None, error_dict) via the knowledge base, owner-scoped."""
+    trace = KB.get_workflow(video_id, owner=owner)
+    if trace is None:
+        return None, {
             "error": "trace not found",
             "video_id": video_id,
-            "hint": "Run /analyze/{video_id} first."
+            "hint": "Run /analyze/{video_id} first.",
         }
+    return trace, None
 
-    with trace_path.open("r") as f:
-        trace = json.load(f)
 
-    return trace
+@app.get("/trace/{video_id}")
+async def get_trace(video_id: str, who: str = Depends(principal)):
+    trace, error = _load_trace_or_error(video_id, owner_for(settings, who))
+    return error or trace
 
 
 @app.post("/ask/{video_id}")
-async def ask_trace(video_id: str, request: AskRequest):
+async def ask_trace(video_id: str, request: AskRequest, who: str = Depends(principal)):
     from model_client import answer_question_over_trace
 
-    trace_path = Path("../data/traces") / f"{video_id}.json"
-
-    if not trace_path.exists():
-        return {
-            "error": "trace not found",
-            "video_id": video_id,
-            "hint": "Run /analyze/{video_id} first."
-        }
-
-    with trace_path.open("r") as f:
-        trace = json.load(f)
+    trace, error = _load_trace_or_error(video_id, owner_for(settings, who))
+    if error:
+        return error
 
     answer = answer_question_over_trace(request.question, trace)
 
@@ -130,20 +231,12 @@ async def ask_trace(video_id: str, request: AskRequest):
 
 
 @app.post("/sop/{video_id}")
-async def generate_sop(video_id: str):
+async def generate_sop(video_id: str, who: str = Depends(principal)):
     from model_client import answer_question_over_trace
 
-    trace_path = Path("../data/traces") / f"{video_id}.json"
-
-    if not trace_path.exists():
-        return {
-            "error": "trace not found",
-            "video_id": video_id,
-            "hint": "Run /analyze/{video_id} first."
-        }
-
-    with trace_path.open("r") as f:
-        trace = json.load(f)
+    trace, error = _load_trace_or_error(video_id, owner_for(settings, who))
+    if error:
+        return error
 
     question = """
 Convert this workflow trace into a reusable SOP for an AI agent.
@@ -161,6 +254,93 @@ Include:
         "video_id": video_id,
         "sop": sop
     }
+
+
+# ---------------------------------------------------------------------------
+# Semantic retrieval + agent-memory export (Phase 2)
+# ---------------------------------------------------------------------------
+
+def _find_step(trace: dict, step_id: int) -> dict | None:
+    return next((s for s in trace.get("steps", []) if s.get("step_id") == step_id), None)
+
+
+def _step_brief(trace: dict, step_id: int) -> dict:
+    s = _find_step(trace, step_id) or {}
+    return {
+        "workflow_id": trace.get("workflow_id"),
+        "step_id": step_id,
+        "window_or_context": s.get("window_or_context", ""),
+        "user_action": s.get("user_action", ""),
+        "inferred_intent": s.get("inferred_intent", ""),
+    }
+
+
+@app.get("/similar-steps/{video_id}/{step_id}")
+def similar_steps(video_id: str, step_id: int, k: int = 5, who: str = Depends(principal)):
+    """Find steps across all recordings semantically similar to this one."""
+    owner = owner_for(settings, who)
+    hits = SEM.similar_steps(video_id, step_id, k)
+    enriched = []
+    for h in hits:
+        trace = KB.get_workflow(h["workflow_id"], owner=owner)
+        if trace:
+            enriched.append({**_step_brief(trace, h["step_id"]), "score": h["score"]})
+    return {"video_id": video_id, "step_id": step_id, "similar": enriched}
+
+
+@app.get("/step-context/{video_id}/{step_id}")
+def step_context(video_id: str, step_id: int, who: str = Depends(principal)):
+    """Return a step's neighborhood: entities touched, prev/next step, and similar steps."""
+    trace, error = _load_trace_or_error(video_id, owner_for(settings, who))
+    if error:
+        return error
+    step = _find_step(trace, step_id)
+    if step is None:
+        return {"error": "step not found", "video_id": video_id, "step_id": step_id}
+
+    refs = set(step.get("entity_refs", []))
+    entities = [e for e in trace.get("entities", []) if e.get("entity_id") in refs]
+    step_ids = [s.get("step_id") for s in trace.get("steps", [])]
+    idx = step_ids.index(step_id) if step_id in step_ids else -1
+
+    return {
+        "video_id": video_id,
+        "step": step,
+        "entities": entities,
+        "previous_step_id": step_ids[idx - 1] if idx > 0 else None,
+        "next_step_id": step_ids[idx + 1] if 0 <= idx < len(step_ids) - 1 else None,
+        "similar_steps": SEM.similar_steps(video_id, step_id, 5),
+    }
+
+
+@app.post("/export/{video_id}")
+def export_artifacts(video_id: str, who: str = Depends(principal)):
+    """Generate deterministic SOP markdown + agent-memory JSON and attach them as
+    first-class artifacts (linked via :EXPORTS in the graph)."""
+    from datetime import datetime, timezone
+    from exporters import build_sop_markdown, agent_memory_json
+
+    owner = owner_for(settings, who)
+    trace, error = _load_trace_or_error(video_id, owner)
+    if error:
+        return error
+
+    out_dir = settings.artifacts_dir / video_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "sop.md").write_text(build_sop_markdown(trace))
+    (out_dir / "memory.json").write_text(agent_memory_json(trace))
+
+    now = datetime.now(timezone.utc).isoformat()
+    generated = [
+        {"kind": "sop_markdown", "uri": f"/media/artifacts/{video_id}/sop.md", "created_at": now},
+        {"kind": "agent_memory_json", "uri": f"/media/artifacts/{video_id}/memory.json", "created_at": now},
+    ]
+    kept = [a for a in trace.get("artifacts", [])
+            if a.get("kind") not in {"sop_markdown", "agent_memory_json"}]
+    trace["artifacts"] = kept + generated
+    KB.put_trace(trace, owner=owner)  # re-persist so :Artifact/:EXPORTS are materialized
+
+    return {"video_id": video_id, "artifacts": trace["artifacts"]}
 
 
 # ---------------------------------------------------------------------------
@@ -185,17 +365,13 @@ class ExecutionStateRequest(BaseModel):
 
 
 @app.get("/plan/{video_id}")
-async def get_execution_plan(video_id: str):
+async def get_execution_plan(video_id: str, who: str = Depends(principal)):
     """Return the structured browser execution plan derived from the trace."""
     from planner import build_execution_plan
 
-    trace_path = Path("../data/traces") / f"{video_id}.json"
-    if not trace_path.exists():
-        return {"error": "trace not found", "video_id": video_id,
-                "hint": "Run /analyze/{video_id} first."}
-
-    with trace_path.open("r") as f:
-        trace = json.load(f)
+    trace, error = _load_trace_or_error(video_id, owner_for(settings, who))
+    if error:
+        return error
 
     actions = build_execution_plan(trace)
     state = _EXECUTION_STATE.get(video_id, {})

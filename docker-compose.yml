@@ -1,0 +1,44 @@
+# Local Gofer Trace stack: backend + Memgraph knowledge graph, one command.
+#
+#   docker compose up
+#
+# Then open the Memgraph Lab graph explorer at http://localhost:3000 and the backend at
+# http://localhost:8001/docs. The MCP server (agent/) and the Space point at API_BASE.
+#
+# To run ONLY the graph (and run the backend on your host for faster iteration):
+#   docker compose up memgraph
+#   GOFER_KB=graph GOFER_GRAPH_URL=bolt://localhost:7687 ./start_backend.sh
+services:
+  memgraph:
+    image: memgraph/memgraph-platform:latest
+    ports:
+      - "7687:7687"   # Bolt
+      - "3000:3000"   # Memgraph Lab (graph explorer UI)
+      - "7444:7444"   # logs
+    volumes:
+      - memgraph_data:/var/lib/memgraph
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      GOFER_PROFILE: local
+      GOFER_KB: graph
+      GOFER_GRAPH_URL: bolt://memgraph:7687
+      GOFER_BLOB_ROOT: /data
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/data
+    depends_on:
+      memgraph:
+        condition: service_started
+
+volumes:
+  memgraph_data: {}

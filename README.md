@@ -19,21 +19,36 @@ HuggingFace Space UI (Gradio 5.x)
   └── POST /sop/{id}        → reusable SOP / agent memory export
 ```
 
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — target architecture, graph model, local vs cloud profiles
+- [docs/ROADMAP.md](docs/ROADMAP.md) — phased plan and status
+- [docs/AGENTS.md](docs/AGENTS.md) — use the MCP server from Claude Code, Cursor, Codex, Hermes
+- [schema/](schema/) — the canonical trace schema (the contract every layer shares)
+
 ## Repo layout
 
 ```
-backend/          FastAPI server (runs on AMD MI300X)
-  main.py         API routes + static video serving
+backend/          FastAPI server + knowledge base
+  main.py         API routes (upload/analyze/search/similar/export/plan…)
+  settings.py     profile-driven config (GOFER_PROFILE=local|cloud)
+  trace_schema.py schema validation + v0→v1 migration
+  knowledge_base.py   KnowledgeBase interface + FileKnowledgeBase + factory
+  graph_knowledge_base.py  Bolt/Cypher adapter (Memgraph local / Neo4j cloud)
+  entity_extraction.py  entities + structured actions from model text
+  embeddings.py / vector_index.py / semantic_index.py  semantic retrieval
+  redaction.py    strips secrets before persistence
+  exporters.py    deterministic SOP markdown + agent-memory JSON
   model_client.py Qwen2.5-VL-7B inference (+ heuristic stub fallback)
-  trace_builder.py converts frame analyses → structured trace JSON
   video_processing.py  OpenCV frame extraction
-  requirements.txt
 
-frontend/hf-space/ Hugging Face Space UI
-  app.py          Gradio 5.x UI
-  requirements.txt
-  README.md       HF Space metadata
-
+agent/            MCP server (mcp_server.py) + execution planner (planner.py)
+capture/          local screen-recording client (gofer_capture.py)
+space/            Hugging Face Space UI (Gradio 5.x)
+schema/           trace.schema.json — the shared contract
+scripts/          migrate_traces.py (v0→v1)
+examples/mcp/     ready-to-copy MCP configs per agent
+docker-compose.yml  local backend + Memgraph (+ Lab explorer) in one command
 start_backend.sh  convenience script to (re)start the backend
 ```
 
@@ -64,9 +79,16 @@ API_BASE=http://localhost:8001 python app.py
 
 ## Environment variables
 
+Configuration is profile-driven — see `.env.example` and `backend/settings.py`. Every
+value has a safe local default, so `GOFER_PROFILE=local` runs offline against localhost.
+
 | Variable | Default | Description |
 |---|---|---|
-| `API_BASE` | `http://134.199.204.12:8001` | AMD backend URL (set in HF Space secrets) |
+| `GOFER_PROFILE` | `local` | Deployment profile: `local` or `cloud` |
+| `GOFER_API_BASE` / `API_BASE` | `http://localhost:8001` | Backend URL (MCP server + Space); set to your deployed URL in cloud |
+| `GOFER_GRAPH_URL` | `bolt://localhost:7687` | Knowledge-base graph (Phase 1): Memgraph local / Neo4j cloud |
+| `GOFER_VLM` | `Qwen/Qwen2.5-VL-7B-Instruct` | Understanding model id/label |
+| `GOFER_BLOB_ROOT` | `./data` | Filesystem root (local) or object-store prefix (cloud) |
 
 ## Demo flow
 

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lightweight test deps
+        # The offline suite needs only these — no torch/opencv/fastapi/GPU/Docker.
+        run: pip install jsonschema neo4j
+
+      - name: Byte-compile all sources
+        run: python -m py_compile backend/*.py agent/*.py space/*.py scripts/*.py capture/*.py tests/*.py
+
+      - name: Validate schema example
+        run: |
+          python -c "import json, jsonschema; \
+            jsonschema.validate(json.load(open('schema/example.trace.json')), \
+                                json.load(open('schema/trace.schema.json'))); \
+            print('schema example valid')"
+
+      - name: Run offline test suite
+        run: python tests/test_gofer.py
