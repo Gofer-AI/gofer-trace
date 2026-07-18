@@ -45,6 +45,9 @@ class Settings:
     graph_database: str   # optional named database (Neo4j); blank for Memgraph
     vlm: str              # understanding model id / label
     blob_root: str        # filesystem root (local) or object-store prefix (cloud)
+    embeddings: str       # "hashing" (offline default) | "sentence-transformers"
+    embedding_model: str  # model id when embeddings=sentence-transformers
+    embedding_dim: int    # vector dim for the hashing embedder
 
     @property
     def is_cloud(self) -> bool:
@@ -62,8 +65,17 @@ class Settings:
     def traces_dir(self) -> Path:
         return Path(self.blob_root) / "traces"
 
+    @property
+    def vectors_dir(self) -> Path:
+        return Path(self.blob_root) / "vectors"
+
+    @property
+    def artifacts_dir(self) -> Path:
+        return Path(self.blob_root) / "artifacts"
+
     def ensure_dirs(self) -> None:
-        for d in (self.videos_dir, self.frames_dir, self.traces_dir):
+        for d in (self.videos_dir, self.frames_dir, self.traces_dir,
+                  self.vectors_dir, self.artifacts_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -81,4 +93,7 @@ def get_settings() -> Settings:
         graph_database=_env("GOFER_GRAPH_DATABASE", default=""),
         vlm=_env("GOFER_VLM", default=_DEFAULT_VLM),
         blob_root=_env("GOFER_BLOB_ROOT", default=_DEFAULT_BLOB_ROOT),
+        embeddings=_env("GOFER_EMBEDDINGS", default="hashing").lower(),
+        embedding_model=_env("GOFER_EMBEDDING_MODEL", default="all-MiniLM-L6-v2"),
+        embedding_dim=int(_env("GOFER_EMBEDDING_DIM", default="256")),
     )

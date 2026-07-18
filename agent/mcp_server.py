@@ -347,5 +347,92 @@ def ask_workflow(video_id: str, question: str) -> str:
     return result.get("answer", "No answer returned.")
 
 
+# ---------------------------------------------------------------------------
+# Semantic retrieval (Phase 2)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_similar_steps(video_id: str, step_id: int, k: int = 5) -> str:
+    """
+    Find steps across all recordings that are semantically similar to a given step.
+    Use this to reuse how something was done elsewhere ("where else did I do this?").
+
+    Args:
+        video_id: The workflow the step belongs to.
+        step_id: The step number to find neighbors for.
+        k: Max number of similar steps to return.
+    """
+    data = _get(f"/similar-steps/{video_id}/{step_id}?k={k}")
+    if "error" in data:
+        return f"Lookup failed: {data['error']}"
+    similar = data.get("similar", [])
+    if not similar:
+        return "No similar steps found (the index may be empty or this step is unique)."
+
+    lines = [f"# Steps similar to {video_id} step {step_id}", ""]
+    for s in similar:
+        lines.append(
+            f"- `{s.get('workflow_id')}` step {s.get('step_id')} "
+            f"(score {s.get('score')}) — {s.get('window_or_context','')}: "
+            f"{s.get('inferred_intent') or s.get('user_action','')}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_step_context(video_id: str, step_id: int) -> str:
+    """
+    Get a step's neighborhood: entities it touches, the previous/next step, and
+    semantically similar steps elsewhere. Use this to understand a step before replaying it.
+
+    Args:
+        video_id: The workflow id.
+        step_id: The step number to inspect.
+    """
+    data = _get(f"/step-context/{video_id}/{step_id}")
+    if "error" in data:
+        return f"Lookup failed: {data['error']}"
+
+    step = data.get("step", {})
+    entities = data.get("entities", [])
+    action = step.get("action", {}) or {}
+    lines = [
+        f"# Step {step_id} context — {video_id}",
+        f"**Context:** {step.get('window_or_context','')}",
+        f"**Intent:** {step.get('inferred_intent','')}",
+        f"**Action:** {action.get('type','')} → `{action.get('target','')}`",
+        f"**Expected:** {action.get('expected_state','')}",
+        "",
+        f"**Neighbors:** prev={data.get('previous_step_id')} · next={data.get('next_step_id')}",
+        "",
+        "**Entities touched:**",
+    ]
+    lines += [f"- {e.get('type')}: {e.get('name')}" for e in entities] or ["- (none)"]
+    similar = data.get("similar_steps", [])
+    if similar:
+        lines += ["", "**Similar steps elsewhere:**"]
+        lines += [f"- `{s['workflow_id']}` step {s['step_id']} (score {s['score']})" for s in similar]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def export_agent_memory(video_id: str) -> str:
+    """
+    Generate and persist reusable agent memory for a workflow: a deterministic SOP
+    (markdown) and the agent-memory JSON, attached as first-class artifacts.
+
+    Args:
+        video_id: The workflow id to export.
+    """
+    data = _post(f"/export/{video_id}")
+    if "error" in data:
+        return f"Export failed: {data['error']}"
+    artifacts = data.get("artifacts", [])
+    lines = [f"✅ Exported agent memory for **{video_id}**:", ""]
+    for a in artifacts:
+        lines.append(f"- **{a.get('kind')}** → `{a.get('uri')}`")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     mcp.run()

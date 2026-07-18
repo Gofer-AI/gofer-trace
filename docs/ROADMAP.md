@@ -74,15 +74,25 @@ cross-workflow queries work through one Cypher adapter on both engines.
 
 > Goal: agents can *find* the right workflow/step, not just fetch one by id.
 
-- ☐ **2.1 Embeddings + vector index.** Per-step/-workflow vectors; `sqlite-vec`/FAISS
-  local, graph-native vector index cloud. Store `embedding_ref` on steps.
-- ☐ **2.2 `search_workflows` + `find_similar_steps` MCP tools.** Semantic + graph.
-  *Accept:* "find a workflow that deploys to staging" returns the right workflow with no id.
-- ☐ **2.3 Markdown agent-memory export as first-class `:Artifact`.** SOP/markdown +
-  agent-memory JSON persisted and linked via `EXPORTS`.
-- ☐ **2.4 `get_step_context` MCP tool.** Step neighborhood (entities, prev/next, similar).
+- ☑ **2.1 Embeddings + vector index.** `embeddings.py` (offline `HashingEmbedder` default,
+  deterministic across processes; opt-in `sentence-transformers`) + `vector_index.py`
+  (`FileVectorIndex`, brute-force cosine) + `semantic_index.py` tying them together.
+  Per-workflow and per-step vectors; `steps[].embedding_ref` persisted. *Verified:*
+  search survives a fresh process load. ◐ *sqlite-vec/FAISS + graph-native cloud index
+  still to come* (interface is ready).
+- ☑ **2.2 Semantic search + `find_similar_steps`.** `/search` is now semantic (keyword
+  fallback when unindexed); new `/similar-steps` endpoint + `find_similar_steps` MCP tool.
+  *Verified:* "deploy the app to staging" ranks the deploy workflow first with no id;
+  "change my account password" ranks the password workflow first.
+- ☑ **2.3 Markdown agent-memory export as first-class `:Artifact`.** `exporters.py`
+  (deterministic SOP markdown + agent-memory JSON) + `/export` endpoint +
+  `export_agent_memory` MCP tool; artifacts attached to the trace and linked via
+  `:EXPORTS`. *Verified:* export appends artifacts, re-validates, and round-trips.
+- ☑ **2.4 `get_step_context`.** New `/step-context` endpoint + MCP tool: entities touched,
+  prev/next step, and similar steps elsewhere.
 
-**Milestone:** an agent with no prior context can discover and reuse the right workflow.
+**Milestone (reached, offline):** an agent with no prior context can discover and reuse
+the right workflow. Semantic ranking upgrades further with `sentence-transformers`.
 
 ---
 

@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "agent"))
 
 from settings import get_settings
 from knowledge_base import create_knowledge_base
+from semantic_index import create_semantic_index
 from redaction import redact_trace
 from video_processing import extract_frames
 from model_client import analyze_frame_with_qwen as analyze_frame_stub
@@ -32,9 +33,12 @@ settings.ensure_dirs()
 # Storage seam — FileKnowledgeBase or GraphKnowledgeBase (Memgraph/Neo4j), chosen by
 # GOFER_KB. Endpoints below are identical regardless of backend.
 KB = create_knowledge_base(settings)
+# Semantic retrieval layer (embeddings + vector index), independent of the KB backend.
+SEM = create_semantic_index(settings)
 
 app.mount("/media/videos", StaticFiles(directory=str(settings.videos_dir)), name="videos")
 app.mount("/media/frames", StaticFiles(directory=str(settings.frames_dir)), name="frames")
+app.mount("/media/artifacts", StaticFiles(directory=str(settings.artifacts_dir)), name="artifacts")
 
 VIDEO_DIR = settings.videos_dir
 
@@ -57,8 +61,17 @@ def list_workflows():
 
 @app.get("/search")
 def search_workflows(q: str, k: int = 5):
-    """Search workflows by keyword (Phase 2 upgrades this to semantic search)."""
-    return {"query": q, "results": KB.search(q, k)}
+    """Semantic workflow search over embeddings; falls back to keyword when unindexed."""
+    hits = SEM.search_workflows(q, k)
+    results = []
+    for h in hits:
+        trace = KB.get_workflow(h["workflow_id"])
+        if trace:
+            from knowledge_base import summarize_trace
+            results.append({**summarize_trace(trace), "score": h["score"]})
+    if not results:
+        results = KB.search(q, k)  # keyword fallback (empty index / no vector hits)
+    return {"query": q, "results": results}
 
 
 @app.post("/upload")
@@ -100,8 +113,9 @@ async def analyze_video(video_id: str):
     model = {"vlm": settings.vlm, "profile": settings.profile}
 
     trace = build_trace(video_id, frame_analyses, source=source, model=model)
-    trace = redact_trace(trace)  # strip obvious secrets before persistence
-    KB.put_trace(trace)  # validates against the schema before persisting
+    trace = redact_trace(trace)     # strip obvious secrets before persistence
+    SEM.index_trace(trace)          # embed workflow + steps; sets steps[].embedding_ref
+    KB.put_trace(trace)             # validates against the schema before persisting
 
     return {
         "video_id": video_id,
@@ -177,6 +191,91 @@ Include:
         "video_id": video_id,
         "sop": sop
     }
+
+
+# ---------------------------------------------------------------------------
+# Semantic retrieval + agent-memory export (Phase 2)
+# ---------------------------------------------------------------------------
+
+def _find_step(trace: dict, step_id: int) -> dict | None:
+    return next((s for s in trace.get("steps", []) if s.get("step_id") == step_id), None)
+
+
+def _step_brief(trace: dict, step_id: int) -> dict:
+    s = _find_step(trace, step_id) or {}
+    return {
+        "workflow_id": trace.get("workflow_id"),
+        "step_id": step_id,
+        "window_or_context": s.get("window_or_context", ""),
+        "user_action": s.get("user_action", ""),
+        "inferred_intent": s.get("inferred_intent", ""),
+    }
+
+
+@app.get("/similar-steps/{video_id}/{step_id}")
+def similar_steps(video_id: str, step_id: int, k: int = 5):
+    """Find steps across all recordings semantically similar to this one."""
+    hits = SEM.similar_steps(video_id, step_id, k)
+    enriched = []
+    for h in hits:
+        trace = KB.get_workflow(h["workflow_id"])
+        if trace:
+            enriched.append({**_step_brief(trace, h["step_id"]), "score": h["score"]})
+    return {"video_id": video_id, "step_id": step_id, "similar": enriched}
+
+
+@app.get("/step-context/{video_id}/{step_id}")
+def step_context(video_id: str, step_id: int):
+    """Return a step's neighborhood: entities touched, prev/next step, and similar steps."""
+    trace, error = _load_trace_or_error(video_id)
+    if error:
+        return error
+    step = _find_step(trace, step_id)
+    if step is None:
+        return {"error": "step not found", "video_id": video_id, "step_id": step_id}
+
+    refs = set(step.get("entity_refs", []))
+    entities = [e for e in trace.get("entities", []) if e.get("entity_id") in refs]
+    step_ids = [s.get("step_id") for s in trace.get("steps", [])]
+    idx = step_ids.index(step_id) if step_id in step_ids else -1
+
+    return {
+        "video_id": video_id,
+        "step": step,
+        "entities": entities,
+        "previous_step_id": step_ids[idx - 1] if idx > 0 else None,
+        "next_step_id": step_ids[idx + 1] if 0 <= idx < len(step_ids) - 1 else None,
+        "similar_steps": SEM.similar_steps(video_id, step_id, 5),
+    }
+
+
+@app.post("/export/{video_id}")
+def export_artifacts(video_id: str):
+    """Generate deterministic SOP markdown + agent-memory JSON and attach them as
+    first-class artifacts (linked via :EXPORTS in the graph)."""
+    from datetime import datetime, timezone
+    from exporters import build_sop_markdown, agent_memory_json
+
+    trace, error = _load_trace_or_error(video_id)
+    if error:
+        return error
+
+    out_dir = settings.artifacts_dir / video_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "sop.md").write_text(build_sop_markdown(trace))
+    (out_dir / "memory.json").write_text(agent_memory_json(trace))
+
+    now = datetime.now(timezone.utc).isoformat()
+    generated = [
+        {"kind": "sop_markdown", "uri": f"/media/artifacts/{video_id}/sop.md", "created_at": now},
+        {"kind": "agent_memory_json", "uri": f"/media/artifacts/{video_id}/memory.json", "created_at": now},
+    ]
+    kept = [a for a in trace.get("artifacts", [])
+            if a.get("kind") not in {"sop_markdown", "agent_memory_json"}]
+    trace["artifacts"] = kept + generated
+    KB.put_trace(trace)  # re-persist so :Artifact/:EXPORTS are materialized
+
+    return {"video_id": video_id, "artifacts": trace["artifacts"]}
 
 
 # ---------------------------------------------------------------------------
